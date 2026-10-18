@@ -15,3 +15,6 @@ playwright-report/
 .env
 .env.*
 !.env.example
+
+# Local stack data (bind mounts)
+data/

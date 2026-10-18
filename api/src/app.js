@@ -368,7 +368,7 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
       if (!(err instanceof HttpError)) logger.error?.("unhandled error", err);
       sendError(res, err);
     } finally {
-      if (config.logRequests) {
+      if (config.logRequests && !(url?.pathname === "/api/health" && res.statusCode === 200)) {
         logger.info?.(`${req.method} ${url?.pathname ?? req.url} ${res.statusCode} ${now() - started}ms`);
       }
     }

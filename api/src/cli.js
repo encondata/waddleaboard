@@ -3,6 +3,7 @@
 //   node src/cli.js seed-demo
 //   node src/cli.js create-admin --username NAME   (password on stdin or WADDLE_ADMIN_PASSWORD)
 //   node src/cli.js create-user --username NAME --role owner
+//   node src/cli.js has-admin   (exit 0 if an admin account exists, 1 if not)
 import path from "node:path";
 import pg from "pg";
 import { hashPassword } from "./auth.js";
@@ -62,6 +63,10 @@ async function main() {
       } finally {
         client.release();
       }
+    } else if (command === "has-admin") {
+      const count = await createPgStore(pool).countUsersByRole("admin");
+      console.log(count ? `${count} admin account(s)` : "no admin account");
+      process.exitCode = count ? 0 : 1;
     } else if (command === "create-admin" || command === "create-user") {
       const role = command === "create-admin" ? "admin" : String(flags.role || "owner");
       const username = String(flags.username || "");
@@ -74,7 +79,7 @@ async function main() {
         process.exitCode = 2;
       }
     } else {
-      console.error("usage: cli.js migrate | seed-demo | create-admin --username NAME | create-user --username NAME [--role owner]");
+      console.error("usage: cli.js migrate | seed-demo | has-admin | create-admin --username NAME | create-user --username NAME [--role owner]");
       process.exitCode = 64;
     }
   } finally {

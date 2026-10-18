@@ -158,3 +158,5 @@ button:disabled { cursor: not-allowed; opacity: .6; }
 .status.rejected { background: #eceff3; color: #53657c; }
 .table-empty { padding: 30px 22px; border-top: 1px solid #edf0f4; color: var(--ink-soft); font-size: .85rem; text-align: center; }
 .admin-error { margin-bottom: 18px; }
+.duck-not-found { padding: 40px 18px; }
+.admin-grid > * { min-width: 0; }
