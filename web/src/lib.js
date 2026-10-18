@@ -29,11 +29,26 @@ export function typePath(slug) {
   return `/types/${encodeURIComponent(slug)}`;
 }
 
-// "Sunny · Serial DP-0427": the duck's design, then its own serial number.
+// "Sunny · Serial DP-0427": individuals are identified by series name plus serial.
 export function serialLabel(duck) {
   const serial = duck?.serial || duck?.code || "";
   const design = duck?.type?.name || duck?.name;
   return design ? `${design} · Serial ${serial}` : `Serial ${serial}`;
+}
+
+// Card subtitle under the series name heading, so a card reads "Sunny / Serial DP-0427".
+export function cardSubtitle(duck) {
+  return `Serial ${duck?.serial || duck?.code || ""}`;
+}
+
+// Ducks come back with `private: true` (trip details nulled) unless the viewer owns them.
+export function duckStatusLine(duck) {
+  return duck?.private ? "Journey details are private" : statusLine(duck?.status);
+}
+
+export function duckWhereabouts(duck) {
+  if (duck?.private) return "Whereabouts shared with its owner only";
+  return duck?.lastSeen || duck?.homePort || "Waiting for a first find";
 }
 
 // Mirrors api/src/validation.js slugify, used to prefill the new-type form.

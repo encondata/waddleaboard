@@ -10,6 +10,9 @@ import {
   isDuckCode,
   matchRoute,
   normalizeDuckCode,
+  cardSubtitle,
+  duckStatusLine,
+  duckWhereabouts,
   serialLabel,
   serialRange,
   slugify,
@@ -111,4 +114,20 @@ test("api client sends JSON and surfaces { error } bodies as ApiError", async ()
   await assert.rejects(request("/html"), (err) => err.status === 502 && /502/.test(err.message));
   const offline = createApiClient(async () => { throw new TypeError("fetch failed"); });
   await assert.rejects(offline("/api/x"), (err) => err.code === "network_error");
+});
+
+test("private ducks show no trip details; owners see them", () => {
+  const priv = { code: "DP-0600", private: true, status: null, lastSeen: null, homePort: null };
+  assert.equal(duckStatusLine(priv), "Journey details are private");
+  assert.equal(duckWhereabouts(priv), "Whereabouts shared with its owner only");
+  const own = { code: "DP-0600", private: false, status: "At sea", lastSeen: "Cozumel, Mexico", homePort: "Galveston" };
+  assert.equal(duckStatusLine(own), "Currently at sea");
+  assert.equal(duckWhereabouts(own), "Cozumel, Mexico");
+  assert.equal(duckWhereabouts({ ...own, lastSeen: null }), "Galveston");
+  assert.equal(duckWhereabouts({ private: false }), "Waiting for a first find");
+});
+
+test("card subtitles carry the serial under the series name", () => {
+  assert.equal(cardSubtitle({ serial: "DP-0427", name: "Sunny", type: { name: "Sunny" } }), "Serial DP-0427");
+  assert.equal(cardSubtitle({ code: "DP-0500" }), "Serial DP-0500");
 });
