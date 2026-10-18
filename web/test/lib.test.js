@@ -10,8 +10,15 @@ import {
   isDuckCode,
   matchRoute,
   normalizeDuckCode,
+  cardSubtitle,
+  duckStatusLine,
+  duckWhereabouts,
+  serialLabel,
+  serialRange,
+  slugify,
   statusLine,
   timeAgo,
+  typePath,
 } from "../src/lib.js";
 
 test("matchRoute keeps the sample routes and matches any duck code", () => {
@@ -28,6 +35,33 @@ test("matchRoute keeps the sample routes and matches any duck code", () => {
   assert.equal(matchRoute("/duck").name, "notFound");
   assert.equal(matchRoute("/duck/DP-0427/extra").name, "notFound");
   assert.equal(matchRoute("/no-such-page").name, "notFound");
+});
+
+test("matchRoute resolves type pages by slug", () => {
+  assert.deepEqual(matchRoute("/types/sunny"), { name: "type", params: { slug: "sunny" } });
+  assert.deepEqual(matchRoute("/types/sunny-2/"), { name: "type", params: { slug: "sunny-2" } });
+  assert.equal(matchRoute("/types").name, "notFound");
+  assert.equal(matchRoute("/types/Sunny").name, "notFound");
+  assert.equal(matchRoute("/types/sunny/extra").name, "notFound");
+  assert.equal(typePath("sunny"), "/types/sunny");
+  assert.equal(matchRoute(typePath("coral")).params.slug, "coral");
+});
+
+test("serial labels name the design and the individual's serial", () => {
+  assert.equal(serialLabel({ code: "DP-0427", serial: "DP-0427", name: "Sunny", type: { slug: "sunny", name: "Sunny" } }), "Sunny · Serial DP-0427");
+  assert.equal(serialLabel({ code: "DP-0431", name: "Pip", type: { name: "Sunny" } }), "Sunny · Serial DP-0431", "type name wins");
+  assert.equal(serialLabel({ code: "DP-0500", name: "Pip" }), "Pip · Serial DP-0500");
+  assert.equal(serialLabel({ code: "DP-0500" }), "Serial DP-0500");
+  assert.equal(serialRange(["DP-0429", "DP-0430", "DP-0431"]), "DP-0429 – DP-0431");
+  assert.equal(serialRange(["DP-0429"]), "DP-0429");
+  assert.equal(serialRange([]), "");
+});
+
+test("slugify prefills type slugs the API accepts", () => {
+  assert.equal(slugify("Sunny"), "sunny");
+  assert.equal(slugify("Captain Quack Jr."), "captain-quack-jr");
+  assert.equal(slugify("!"), "");
+  assert.match(slugify("Ünïcode Duck 2"), /^[a-z0-9-]{2,40}$/);
 });
 
 test("duck codes normalize the same way as the API", () => {
@@ -80,4 +114,20 @@ test("api client sends JSON and surfaces { error } bodies as ApiError", async ()
   await assert.rejects(request("/html"), (err) => err.status === 502 && /502/.test(err.message));
   const offline = createApiClient(async () => { throw new TypeError("fetch failed"); });
   await assert.rejects(offline("/api/x"), (err) => err.code === "network_error");
+});
+
+test("private ducks show no trip details; owners see them", () => {
+  const priv = { code: "DP-0600", private: true, status: null, lastSeen: null, homePort: null };
+  assert.equal(duckStatusLine(priv), "Journey details are private");
+  assert.equal(duckWhereabouts(priv), "Whereabouts shared with its owner only");
+  const own = { code: "DP-0600", private: false, status: "At sea", lastSeen: "Cozumel, Mexico", homePort: "Galveston" };
+  assert.equal(duckStatusLine(own), "Currently at sea");
+  assert.equal(duckWhereabouts(own), "Cozumel, Mexico");
+  assert.equal(duckWhereabouts({ ...own, lastSeen: null }), "Galveston");
+  assert.equal(duckWhereabouts({ private: false }), "Waiting for a first find");
+});
+
+test("card subtitles carry the serial under the series name", () => {
+  assert.equal(cardSubtitle({ serial: "DP-0427", name: "Sunny", type: { name: "Sunny" } }), "Serial DP-0427");
+  assert.equal(cardSubtitle({ code: "DP-0500" }), "Serial DP-0500");
 });

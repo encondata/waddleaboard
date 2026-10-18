@@ -20,7 +20,52 @@ export function matchRoute(pathname) {
     }
     return { name: "duck", params: { code } };
   }
+  const type = /^\/types\/([a-z0-9-]{2,40})$/.exec(path);
+  if (type) return { name: "type", params: { slug: type[1] } };
   return { name: "notFound", params: {} };
+}
+
+export function typePath(slug) {
+  return `/types/${encodeURIComponent(slug)}`;
+}
+
+// "Sunny · Serial DP-0427": individuals are identified by series name plus serial.
+export function serialLabel(duck) {
+  const serial = duck?.serial || duck?.code || "";
+  const design = duck?.type?.name || duck?.name;
+  return design ? `${design} · Serial ${serial}` : `Serial ${serial}`;
+}
+
+// Card subtitle under the series name heading, so a card reads "Sunny / Serial DP-0427".
+export function cardSubtitle(duck) {
+  return `Serial ${duck?.serial || duck?.code || ""}`;
+}
+
+// Ducks come back with `private: true` (trip details nulled) unless the viewer owns them.
+export function duckStatusLine(duck) {
+  return duck?.private ? "Journey details are private" : statusLine(duck?.status);
+}
+
+export function duckWhereabouts(duck) {
+  if (duck?.private) return "Whereabouts shared with its owner only";
+  return duck?.lastSeen || duck?.homePort || "Waiting for a first find";
+}
+
+// Mirrors api/src/validation.js slugify, used to prefill the new-type form.
+export function slugify(name) {
+  const slug = String(name ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 36)
+    .replace(/-+$/, "");
+  return slug.length >= 2 ? slug : "";
+}
+
+// "DP-0429" or "DP-0429 – DP-0431" for a list of freshly registered serials.
+export function serialRange(serials) {
+  if (!serials?.length) return "";
+  return serials.length === 1 ? serials[0] : `${serials[0]} – ${serials[serials.length - 1]}`;
 }
 
 // Mirrors api/src/validation.js normalizeDuckCode so links are canonical.

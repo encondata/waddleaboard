@@ -1,17 +1,34 @@
 // PostgreSQL-backed data access. The api handlers only talk to this interface,
 // so tests can swap in an in-memory store (see test/fakes.js).
 
+import { nextSerials, slugify } from "./validation.js";
+
 const DUCK_SELECT = `
   SELECT d.*, u.username AS owner_username,
+    t.slug AS type_slug, t.name AS type_name, t.color AS type_color, t.accent AS type_accent,
+    t.image_url AS type_image_url, t.story AS type_story,
     (SELECT count(*) FROM finds f WHERE f.duck_id = d.id AND f.status = 'approved')::int AS find_count,
     (SELECT f.place FROM finds f WHERE f.duck_id = d.id AND f.status = 'approved'
        ORDER BY f.created_at DESC LIMIT 1) AS last_seen
-  FROM ducks d LEFT JOIN users u ON u.id = d.owner_id`;
+  FROM ducks d
+  JOIN duck_types t ON t.id = d.type_id
+  LEFT JOIN users u ON u.id = d.owner_id`;
+
+// Serials sort by prefix, then numerically, so DP-0999 comes before DP-10000.
+const SERIAL_ORDER = "split_part(d.code, '-', 1), split_part(d.code, '-', 2)::int";
+
+const TYPE_SELECT = `
+  SELECT t.*,
+    (SELECT count(*) FROM ducks d WHERE d.type_id = t.id)::int AS duck_count,
+    (SELECT count(*) FROM finds f JOIN ducks d ON d.id = f.duck_id
+       WHERE d.type_id = t.id AND f.status = 'approved')::int AS find_count
+  FROM duck_types t`;
 
 const FIND_SELECT = `
-  SELECT f.*, p.id AS photo_id, d.code AS duck_code, d.name AS duck_name
+  SELECT f.*, p.id AS photo_id, d.code AS duck_code, t.name AS duck_name
   FROM finds f
   JOIN ducks d ON d.id = f.duck_id
+  JOIN duck_types t ON t.id = d.type_id
   LEFT JOIN photos p ON p.find_id = f.id`;
 
 const iso = (v) => (v instanceof Date ? v.toISOString() : v ?? null);
@@ -34,6 +51,28 @@ export function mapDuck(r) {
     createdAt: iso(r.created_at),
     findCount: r.find_count ?? 0,
     lastSeen: r.last_seen ?? null,
+    typeId: r.type_id === null || r.type_id === undefined ? null : Number(r.type_id),
+    typeSlug: r.type_slug ?? null,
+    typeName: r.type_name ?? null,
+    typeColor: r.type_color ?? null,
+    typeAccent: r.type_accent ?? null,
+    typeImageUrl: r.type_image_url ?? null,
+    typeStory: r.type_story ?? null,
+  };
+}
+
+export function mapDuckType(r) {
+  return {
+    id: Number(r.id),
+    slug: r.slug,
+    name: r.name,
+    color: r.color,
+    accent: r.accent,
+    imageUrl: r.image_url,
+    story: r.story,
+    createdAt: iso(r.created_at),
+    duckCount: r.duck_count ?? 0,
+    findCount: r.find_count ?? 0,
   };
 }
 
@@ -85,6 +124,32 @@ export function createPgStore(pool) {
     }
   }
 
+  async function duckById(db, id) {
+    const { rows } = await db.query(`${DUCK_SELECT} WHERE d.id = $1`, [id]);
+    return rows[0] ? mapDuck(rows[0]) : null;
+  }
+
+  // Matches an existing type on name and color (case-insensitive), else creates one with a
+  // free slug. The transaction-scoped lock stops two creates from racing on the same slug.
+  async function findOrCreateType(client, d) {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('duck_types'))");
+    const found = await client.query(
+      "SELECT id FROM duck_types WHERE lower(name) = lower($1) AND lower(color) = lower($2) ORDER BY id LIMIT 1",
+      [d.name, d.color],
+    );
+    if (found.rows[0]) return found.rows[0].id;
+    const base = slugify(d.name);
+    for (let n = 1; ; n++) {
+      const slug = n === 1 ? base : `${base}-${n}`;
+      const { rows } = await client.query(
+        `INSERT INTO duck_types (slug, name, color, accent, image_url, story) VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (slug) DO NOTHING RETURNING id`,
+        [slug, d.name, d.color, d.accent || "gold", d.imageUrl ?? null, d.story ?? null],
+      );
+      if (rows[0]) return rows[0].id;
+    }
+  }
+
   async function findById(db, id) {
     const { rows } = await db.query(`${FIND_SELECT} WHERE f.id = $1`, [id]);
     return rows[0] ? mapFind(rows[0]) : null;
@@ -110,14 +175,66 @@ export function createPgStore(pool) {
       return rows.map(mapDuck);
     },
 
+    // Without d.typeId, reuses the type with the same name and color, or creates one.
     async createDuck(d) {
+      return tx(async (client) => {
+        const typeId = d.typeId ?? (await findOrCreateType(client, d));
+        const { rows } = await client.query(
+          `INSERT INTO ducks (code, type_id, name, color, accent, status, story, home_port, ship, miles, image_url, owner_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+          [d.code, typeId, d.name, d.color, d.accent, d.status, d.story, d.homePort, d.ship, d.miles, d.imageUrl, d.ownerId],
+        );
+        return duckById(client, rows[0].id);
+      });
+    },
+
+    async createDuckType(t) {
       const { rows } = await pool.query(
-        `INSERT INTO ducks (code, name, color, accent, status, story, home_port, ship, miles, image_url, owner_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
-        [d.code, d.name, d.color, d.accent, d.status, d.story, d.homePort, d.ship, d.miles, d.imageUrl, d.ownerId],
+        `INSERT INTO duck_types (slug, name, color, accent, image_url, story) VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (slug) DO NOTHING RETURNING id`,
+        [t.slug, t.name, t.color, t.accent || "gold", t.imageUrl, t.story],
       );
-      const created = await pool.query(`${DUCK_SELECT} WHERE d.id = $1`, [rows[0].id]);
-      return mapDuck(created.rows[0]);
+      if (!rows[0]) return null;
+      const created = await pool.query(`${TYPE_SELECT} WHERE t.id = $1`, [rows[0].id]);
+      return mapDuckType(created.rows[0]);
+    },
+
+    async findDuckTypeBySlug(slug) {
+      const { rows } = await pool.query(`${TYPE_SELECT} WHERE t.slug = $1`, [slug]);
+      return rows[0] ? mapDuckType(rows[0]) : null;
+    },
+
+    async listDuckTypes() {
+      const { rows } = await pool.query(`${TYPE_SELECT} ORDER BY t.name, t.slug`);
+      return rows.map(mapDuckType);
+    },
+
+    async listDucksByType(typeId) {
+      const { rows } = await pool.query(`${DUCK_SELECT} WHERE d.type_id = $1 ORDER BY ${SERIAL_ORDER}`, [typeId]);
+      return rows.map(mapDuck);
+    },
+
+    // Registers `count` individuals of a type with the next free serials under `prefix`.
+    // The advisory lock serialises batches per prefix; UNIQUE (code) is the backstop.
+    async createDucksBatch({ typeId, count, prefix, ownerId }) {
+      return tx(async (client) => {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('ducks_serial'), hashtext($1))", [prefix]);
+        const { rows: top } = await client.query(
+          `SELECT max(split_part(code, '-', 2)::int) AS highest FROM ducks WHERE split_part(code, '-', 1) = $1`,
+          [prefix],
+        );
+        const serials = nextSerials(prefix, top[0].highest, count);
+        const { rows } = await client.query(
+          `INSERT INTO ducks (code, type_id, name, status, owner_id)
+           SELECT s.code, t.id, t.name, 'Sailing', $3 FROM unnest($1::text[]) AS s (code)
+           JOIN duck_types t ON t.id = $2
+           RETURNING id`,
+          [serials, typeId, ownerId ?? null],
+        );
+        const ids = rows.map((r) => r.id);
+        const created = await client.query(`${DUCK_SELECT} WHERE d.id = ANY($1::bigint[]) ORDER BY ${SERIAL_ORDER}`, [ids]);
+        return created.rows.map(mapDuck);
+      });
     },
 
     async listApprovedFinds(duckId) {

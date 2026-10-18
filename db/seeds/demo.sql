@@ -1,18 +1,38 @@
 -- Demo content from the duckport-site sample. Only runs when SEED_DEMO=1. Safe to re-run.
-INSERT INTO ducks (code, name, color, accent, status, story, home_port, ship, miles, image_url)
+-- Designs first. Slugs match what migration 005 derives for the original four demo ducks.
+INSERT INTO duck_types (slug, name, color, accent, image_url, story)
 VALUES
-  ('DP-0427', 'Sunny', 'Marigold', 'gold', 'Sailing',
+  ('sunny', 'Sunny', 'Marigold', 'gold', '/assets/duckport/sunny-hero.png',
+   'Sunny began his voyage in Galveston with one mission: collect bright stories from kind people around the world.'),
+  ('coral', 'Coral', 'Coral', 'coral', '/assets/duckport/coral-portrait.png',
+   'Coral loves a sandy beach and a good postcard.'),
+  ('minty', 'Minty', 'Seafoam', 'mint', '/assets/duckport/minty-portrait.png',
+   'Minty has hopped between six islands and counting.'),
+  ('skipper', 'Skipper', 'Blue', 'blue', '/assets/duckport/blue-portrait.png',
+   'Skipper prefers the open ocean and long sea days.')
+ON CONFLICT (slug) DO NOTHING;
+
+-- Individuals. The first four carry their own design (as before types existed); the extra
+-- Sunnys inherit color, accent, artwork and story from their type.
+INSERT INTO ducks (code, type_id, name, color, accent, status, story, home_port, ship, miles, image_url)
+SELECT v.code, t.id, v.name, v.color, v.accent, v.status, v.story, v.home_port, v.ship, v.miles, v.image_url
+FROM (VALUES
+  ('DP-0427', 'sunny', 'Sunny', 'Marigold', 'gold', 'Sailing',
    'Sunny began his voyage in Galveston with one mission: collect bright stories from kind people around the world.',
    'Galveston', 'Harmony of the Seas', 1284, '/assets/duckport/sunny-hero.png'),
-  ('DP-0912', 'Coral', 'Coral', 'coral', 'On shore',
+  ('DP-0912', 'coral', 'Coral', 'Coral', 'coral', 'On shore',
    'Coral loves a sandy beach and a good postcard.', 'Miami', 'Wonder of the Seas', 862,
    '/assets/duckport/coral-portrait.png'),
-  ('DP-1180', 'Minty', 'Seafoam', 'mint', 'Rehidden',
+  ('DP-1180', 'minty', 'Minty', 'Seafoam', 'mint', 'Rehidden',
    'Minty has hopped between six islands and counting.', 'Fort Lauderdale', 'Celebrity Beyond', 2016,
    '/assets/duckport/minty-portrait.png'),
-  ('DP-1564', 'Skipper', 'Blue', 'blue', 'At sea',
+  ('DP-1564', 'skipper', 'Skipper', 'Blue', 'blue', 'At sea',
    'Skipper prefers the open ocean and long sea days.', 'Port Canaveral', 'Carnival Jubilee', 734,
-   '/assets/duckport/blue-portrait.png')
+   '/assets/duckport/blue-portrait.png'),
+  ('DP-0428', 'sunny', 'Sunny', NULL, NULL, 'Sailing', NULL, 'Galveston', 'Harmony of the Seas', 0, NULL),
+  ('DP-0429', 'sunny', 'Sunny', NULL, NULL, 'Sailing', NULL, 'Miami', 'Wonder of the Seas', 0, NULL)
+) AS v (code, type_slug, name, color, accent, status, story, home_port, ship, miles, image_url)
+JOIN duck_types t ON t.slug = v.type_slug
 ON CONFLICT (code) DO NOTHING;
 
 INSERT INTO finds (duck_id, finder_name, place, spot, note, rehidden, status, image_url, created_at, moderated_at)
