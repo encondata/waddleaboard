@@ -1,9 +1,20 @@
 // In-memory stand-ins for Postgres and MinIO so api tests run without Docker.
 import { Readable } from "node:stream";
+import { nextSerials, slugify } from "../src/validation.js";
+
+const serialParts = (code) => {
+  const [prefix, num] = code.split("-");
+  return [prefix, Number(num)];
+};
+const bySerial = (a, b) => {
+  const [pa, na] = serialParts(a.code);
+  const [pb, nb] = serialParts(b.code);
+  return pa === pb ? na - nb : pa.localeCompare(pb);
+};
 
 export function createMemoryStore() {
-  const db = { users: [], sessions: new Map(), ducks: [], finds: [], photos: [] };
-  let ids = { users: 0, ducks: 0, finds: 0 };
+  const db = { users: [], sessions: new Map(), ducks: [], finds: [], photos: [], types: [] };
+  let ids = { users: 0, ducks: 0, finds: 0, types: 0 };
   const state = { down: false };
 
   const duckView = (d) => {
@@ -11,7 +22,72 @@ export function createMemoryStore() {
       .filter((f) => f.duckId === d.id && f.status === "approved")
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     const owner = db.users.find((u) => u.id === d.ownerId);
-    return { ...d, findCount: approved.length, lastSeen: approved[0]?.place ?? null, ownerUsername: owner?.username ?? null };
+    const type = db.types.find((t) => t.id === d.typeId);
+    return {
+      ...d,
+      findCount: approved.length,
+      lastSeen: approved[0]?.place ?? null,
+      ownerUsername: owner?.username ?? null,
+      typeSlug: type.slug,
+      typeName: type.name,
+      typeColor: type.color,
+      typeAccent: type.accent,
+      typeImageUrl: type.imageUrl,
+      typeStory: type.story,
+    };
+  };
+  const typeView = (t) => {
+    const ducks = db.ducks.filter((d) => d.typeId === t.id).map((d) => d.id);
+    const finds = db.finds.filter((f) => ducks.includes(f.duckId) && f.status === "approved");
+    return { ...t, duckCount: ducks.length, findCount: finds.length };
+  };
+  const insertType = (t) => {
+    if (db.types.some((x) => x.slug === t.slug)) return null;
+    const type = {
+      id: ++ids.types,
+      slug: t.slug,
+      name: t.name,
+      color: t.color,
+      accent: t.accent || "gold",
+      imageUrl: t.imageUrl ?? null,
+      story: t.story ?? null,
+      createdAt: new Date().toISOString(),
+    };
+    db.types.push(type);
+    return type;
+  };
+  const findOrCreateType = (input) => {
+    const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+    const found = db.types.find((t) => same(t.name, input.name) && same(t.color, input.color));
+    if (found) return found.id;
+    const base = slugify(input.name);
+    for (let n = 1; ; n++) {
+      const type = insertType({ ...input, slug: n === 1 ? base : `${base}-${n}` });
+      if (type) return type.id;
+    }
+  };
+  const insertDuck = (input) => {
+    if (db.ducks.some((d) => d.code === input.code)) {
+      throw Object.assign(new Error("duplicate key value violates unique constraint"), { code: "23505" });
+    }
+    const duck = {
+      id: ++ids.ducks,
+      code: input.code,
+      typeId: input.typeId ?? findOrCreateType(input),
+      name: input.name,
+      color: input.color ?? null,
+      accent: input.accent ?? null,
+      status: input.status || "Sailing",
+      story: input.story ?? null,
+      homePort: input.homePort ?? null,
+      ship: input.ship ?? null,
+      miles: input.miles ?? 0,
+      imageUrl: input.imageUrl ?? null,
+      ownerId: input.ownerId ?? null,
+      createdAt: new Date().toISOString(),
+    };
+    db.ducks.push(duck);
+    return duck;
   };
   const findView = (f) => {
     const duck = db.ducks.find((d) => d.id === f.duckId);
@@ -36,23 +112,33 @@ export function createMemoryStore() {
       return db.ducks.filter((d) => d.ownerId === userId).map(duckView);
     },
     async createDuck(input) {
-      const duck = {
-        id: ++ids.ducks,
-        code: input.code,
-        name: input.name,
-        color: input.color,
-        accent: input.accent || "gold",
-        status: input.status || "Sailing",
-        story: input.story ?? null,
-        homePort: input.homePort ?? null,
-        ship: input.ship ?? null,
-        miles: input.miles ?? 0,
-        imageUrl: input.imageUrl ?? null,
-        ownerId: input.ownerId ?? null,
-        createdAt: new Date().toISOString(),
-      };
-      db.ducks.push(duck);
-      return duckView(duck);
+      return duckView(insertDuck(input));
+    },
+    async createDuckType(t) {
+      const type = insertType(t);
+      return type ? typeView(type) : null;
+    },
+    async findDuckTypeBySlug(slug) {
+      const type = db.types.find((t) => t.slug === slug);
+      return type ? typeView(type) : null;
+    },
+    async listDuckTypes() {
+      return [...db.types].sort((a, b) => a.name.localeCompare(b.name)).map(typeView);
+    },
+    async listDucksByType(typeId) {
+      return db.ducks.filter((d) => d.typeId === typeId).sort(bySerial).map(duckView);
+    },
+    async createDucksBatch({ typeId, count, prefix, ownerId }) {
+      const type = db.types.find((t) => t.id === typeId);
+      const highest = Math.max(0, ...db.ducks.map((d) => serialParts(d.code)).filter(([p]) => p === prefix).map(([, n]) => n));
+      const serials = nextSerials(prefix, highest, count);
+      const snapshot = [...db.ducks];
+      try {
+        return serials.map((code) => duckView(insertDuck({ code, typeId, name: type.name, status: "Sailing", ownerId })));
+      } catch (err) {
+        db.ducks = snapshot;
+        throw err;
+      }
     },
     async listApprovedFinds(duckId) {
       return db.finds
@@ -87,6 +173,8 @@ export function createMemoryStore() {
       const f = db.finds.find((x) => x.id === id);
       if (!f) return null;
       Object.assign(f, { status, moderatedAt: now.toISOString(), moderatedBy: moderatorId });
+      const duck = db.ducks.find((d) => d.id === f.duckId);
+      if (status === "approved" && duck.status !== "Retired") duck.status = f.rehidden ? "Rehidden" : "Adopted";
       return findView(f);
     },
     async getPhoto(id) {

@@ -241,6 +241,8 @@ describe("admin gating", () => {
     ["POST", "/api/admin/finds/1/flag"],
     ["POST", "/api/admin/ducks"],
     ["POST", "/api/admin/users"],
+    ["POST", "/api/admin/duck-types"],
+    ["POST", "/api/admin/duck-types/sunny/ducks"],
   ];
 
   test("admin endpoints return 401 without a session", async () => {
@@ -309,6 +311,175 @@ describe("admin moderation and provisioning", () => {
   });
 });
 
+describe("duck types and individuals", () => {
+  const sunny = () => ctx.store.findDuckTypeBySlug("sunny");
+
+  test("duck JSON carries serial and type, with design inherited from the type", async () => {
+    const type = await sunny();
+    assert.ok(type, "the setup duck was given a sunny type");
+    await ctx.store.createDuck({ code: "DP-0430", typeId: type.id, name: "Sunny" });
+    const { status, data } = await api("/api/ducks/DP-0430");
+    assert.equal(status, 200);
+    assert.equal(data.duck.serial, "DP-0430");
+    assert.equal(data.duck.code, "DP-0430");
+    assert.equal(data.duck.type.slug, "sunny");
+    assert.equal(data.duck.type.name, "Sunny");
+    assert.equal(data.duck.color, "Marigold", "color falls back to the type");
+    assert.equal(data.duck.accent, "gold");
+    for (const key of ["name", "status", "story", "homePort", "ship", "miles", "imageUrl", "launchedAt", "lastSeen", "findCount"]) {
+      assert.ok(key in data.duck, `${key} still present`);
+    }
+  });
+
+  test("a duck's own design overrides its type", async () => {
+    const type = await sunny();
+    await ctx.store.createDuck({ code: "DP-0431", typeId: type.id, name: "Pip", color: "Coral", accent: "coral", imageUrl: "/x.png", story: "Mine." });
+    const { data } = await api("/api/ducks/DP-0431");
+    assert.equal(data.duck.name, "Pip");
+    assert.equal(data.duck.color, "Coral");
+    assert.equal(data.duck.accent, "coral");
+    assert.equal(data.duck.imageUrl, "/x.png");
+    assert.equal(data.duck.story, "Mine.");
+    assert.equal(data.duck.type.color, "Marigold");
+  });
+
+  test("individuals of one type keep separate guest books, status and counts", async () => {
+    const type = await sunny();
+    await ctx.store.createDuck({ code: "DP-0428", typeId: type.id, name: "Sunny" });
+    const sent = await api("/api/ducks/DP-0428/finds", { method: "POST", json: { name: "Maya", place: "Cozumel, Mexico", note: "Hi", rehidden: "yes" } });
+    const { cookie } = await login("admin", "admin-password");
+    assert.equal((await api(`/api/admin/finds/${sent.data.find.id}/approve`, { method: "POST", cookie })).status, 200);
+
+    const found = (await api("/api/ducks/DP-0428")).data.duck;
+    const other = (await api("/api/ducks/DP-0427")).data.duck;
+    assert.deepEqual([found.findCount, found.lastSeen, found.status], [1, "Cozumel, Mexico", "Rehidden"]);
+    assert.deepEqual([other.findCount, other.lastSeen, other.status], [0, null, "Sailing"]);
+    assert.equal((await api("/api/ducks/DP-0427/finds")).data.finds.length, 0);
+
+    const listed = await api("/api/duck-types/sunny");
+    assert.equal(listed.status, 200);
+    assert.deepEqual(listed.data.ducks.map((d) => [d.serial, d.findCount]), [["DP-0427", 0], ["DP-0428", 1]]);
+    assert.equal(listed.data.type.duckCount, 2);
+    assert.equal(listed.data.type.findCount, 1, "type-level total");
+    assert.equal(listed.data.ducks[0].id, undefined, "public fields only");
+    assert.equal(listed.data.ducks[0].ownerId, undefined);
+
+    const all = await api("/api/duck-types");
+    assert.equal(all.status, 200);
+    const row = all.data.types.find((t) => t.slug === "sunny");
+    assert.deepEqual([row.duckCount, row.findCount], [2, 1]);
+    assertJsonError(await api("/api/duck-types/nope"), 404);
+    assert.equal((await api("/api/duck-types/nope")).data.error.code, "duck_type_not_found");
+    assertJsonError(await api("/api/duck-types/BAD%20SLUG"), 404);
+  });
+
+  test("individuals of a type are listed in serial order", async () => {
+    const type = await sunny();
+    for (const code of ["DP-10000", "DP-0999", "AB-0001"]) await ctx.store.createDuck({ code, typeId: type.id, name: "Sunny" });
+    const { data } = await api("/api/duck-types/sunny");
+    assert.deepEqual(data.ducks.map((d) => d.serial), ["AB-0001", "DP-0427", "DP-0999", "DP-10000"]);
+  });
+
+  test("admins create types; duplicates, bad slugs and non-admins are rejected", async () => {
+    const body = { slug: "coral", name: "Coral", color: "Coral" };
+    assertJsonError(await api("/api/admin/duck-types", { method: "POST", json: body }), 401);
+    const owner = await login("pat", "owner-password");
+    assertJsonError(await api("/api/admin/duck-types", { method: "POST", cookie: owner.cookie, json: body }), 403);
+
+    const { cookie } = await login("admin", "admin-password");
+    const created = await api("/api/admin/duck-types", { method: "POST", cookie, json: body });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.deepEqual(
+      { slug: created.data.type.slug, name: created.data.type.name, color: created.data.type.color, accent: created.data.type.accent },
+      { slug: "coral", name: "Coral", color: "Coral", accent: "coral" },
+    );
+    const dup = await api("/api/admin/duck-types", { method: "POST", cookie, json: body });
+    assertJsonError(dup, 409);
+    assert.equal(dup.data.error.code, "duck_type_exists");
+    for (const slug of ["Coral", "c", "has space", "x".repeat(41), "", undefined, 42]) {
+      const bad = await api("/api/admin/duck-types", { method: "POST", cookie, json: { ...body, slug } });
+      assertJsonError(bad, 400);
+      assert.equal(bad.data.error.code, "validation_failed", `slug ${slug}`);
+    }
+  });
+
+  test("batch registration allocates the next consecutive serials", async () => {
+    const type = await sunny();
+    await ctx.store.createDuck({ code: "DP-0428", typeId: type.id, name: "Sunny" });
+    const { cookie } = await login("admin", "admin-password");
+    const r = await api("/api/admin/duck-types/sunny/ducks", { method: "POST", cookie, json: { count: 3 } });
+    assert.equal(r.status, 201, JSON.stringify(r.data));
+    assert.deepEqual(r.data.serials, ["DP-0429", "DP-0430", "DP-0431"]);
+    for (const duck of r.data.ducks) {
+      assert.equal(duck.type.slug, "sunny");
+      assert.equal(duck.name, "Sunny");
+      assert.equal(duck.color, "Marigold");
+      assert.equal(duck.status, "Sailing");
+    }
+    assert.equal((await api("/api/ducks/DP-0431")).data.duck.type.slug, "sunny");
+
+    const owned = await api("/api/admin/duck-types/sunny/ducks", { method: "POST", cookie, json: { count: 2, prefix: "wa", owner: "pat" } });
+    assert.equal(owned.status, 201, JSON.stringify(owned.data));
+    assert.deepEqual(owned.data.serials, ["WA-0001", "WA-0002"]);
+    const pat = await login("pat", "owner-password");
+    assert.deepEqual((await api("/api/my/ducks", { cookie: pat.cookie })).data.ducks.map((d) => d.code), ["DP-0427", "WA-0001", "WA-0002"]);
+  });
+
+  test("batch registration validates count, type and owner", async () => {
+    const { cookie } = await login("admin", "admin-password");
+    const before = ctx.store.db.ducks.length;
+    for (const count of [0, 101, 2.5, "three", null, undefined]) {
+      const r = await api("/api/admin/duck-types/sunny/ducks", { method: "POST", cookie, json: { count } });
+      assertJsonError(r, 400);
+      assert.equal(r.data.error.code, "validation_failed", `count ${count}`);
+    }
+    assertJsonError(await api("/api/admin/duck-types/sunny/ducks", { method: "POST", cookie, json: { count: 1, prefix: "D1" } }), 400);
+    const missing = await api("/api/admin/duck-types/nope/ducks", { method: "POST", cookie, json: { count: 1 } });
+    assertJsonError(missing, 404);
+    assert.equal(missing.data.error.code, "duck_type_not_found");
+    const owner = await api("/api/admin/duck-types/sunny/ducks", { method: "POST", cookie, json: { count: 1, owner: "nobody" } });
+    assertJsonError(owner, 400);
+    assert.equal(owner.data.error.code, "unknown_owner");
+    assert.equal(ctx.store.db.ducks.length, before, "nothing created");
+  });
+
+  test("single create without a type still works and finds or creates a matching type", async () => {
+    const { cookie } = await login("admin", "admin-password");
+    const same = await api("/api/admin/ducks", { method: "POST", cookie, json: { code: "DP-2001", name: "sunny", color: "marigold" } });
+    assert.equal(same.status, 201, JSON.stringify(same.data));
+    assert.equal(same.data.duck.type.slug, "sunny", "matched case-insensitively");
+    const fresh = await api("/api/admin/ducks", { method: "POST", cookie, json: { code: "DP-2002", name: "Sunny", color: "Blue" } });
+    assert.equal(fresh.status, 201);
+    assert.equal(fresh.data.duck.type.slug, "sunny-2", "slug suffix on collision");
+    assert.equal(fresh.data.duck.accent, "blue");
+  });
+
+  test("single create with a type inherits name and color", async () => {
+    const { cookie } = await login("admin", "admin-password");
+    const r = await api("/api/admin/ducks", { method: "POST", cookie, json: { code: "DP-0500", type: "sunny" } });
+    assert.equal(r.status, 201, JSON.stringify(r.data));
+    assert.equal(r.data.duck.name, "Sunny");
+    assert.equal(r.data.duck.color, "Marigold");
+    assert.equal(r.data.duck.type.slug, "sunny");
+    const named = await api("/api/admin/ducks", { method: "POST", cookie, json: { code: "DP-0501", type: "sunny", name: "Pip" } });
+    assert.equal(named.data.duck.name, "Pip");
+    const unknown = await api("/api/admin/ducks", { method: "POST", cookie, json: { code: "DP-0502", type: "nope" } });
+    assertJsonError(unknown, 400);
+    assert.equal(unknown.data.error.code, "unknown_type");
+    assertJsonError(await api("/api/admin/ducks", { method: "POST", cookie, json: { code: "DP-0503" } }), 400);
+
+    const list = await api("/api/admin/ducks", { cookie });
+    const row = list.data.ducks.find((d) => d.code === "DP-0500");
+    assert.deepEqual([row.type.slug, row.type.name], ["sunny", "Sunny"]);
+  });
+
+  test("stats still count individuals", async () => {
+    const { cookie } = await login("admin", "admin-password");
+    await api("/api/admin/duck-types/sunny/ducks", { method: "POST", cookie, json: { count: 2 } });
+    assert.equal((await api("/api/stats")).data.stats.ducks, 3);
+  });
+});
+
 describe("my flock", () => {
   test("requires a session and lists only the owner's ducks", async () => {
     assertJsonError(await api("/api/my/ducks"), 401);
@@ -317,6 +488,7 @@ describe("my flock", () => {
     const r = await api("/api/my/ducks", { cookie });
     assert.equal(r.status, 200);
     assert.deepEqual(r.data.ducks.map((d) => d.code), ["DP-0427"]);
+    assert.equal(r.data.ducks[0].type.name, "Sunny");
   });
 });
 

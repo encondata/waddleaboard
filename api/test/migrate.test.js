@@ -48,5 +48,23 @@ test("repo migrations are ordered and define users, ducks, finds and photos", as
     assert.match(sql, new RegExp(`CREATE TABLE ${table} \\(`), `${table} table`);
   }
   assert.match(sql, /role IN \('admin', 'owner'\)/);
+  assert.match(sql, /CREATE TABLE duck_types \(/);
   assert.match(sql, /DEFAULT 'pending'/);
+});
+
+test("migration 005 adds duck types, backfills ducks and then requires type_id", async () => {
+  const migrations = await listMigrations(REPO_MIGRATIONS);
+  const names = migrations.map((m) => m.name);
+  assert.ok(names.includes("005_duck_types.sql"));
+  assert.ok(names.every((n) => /^\d{3}_[a-z0-9_]+\.sql$/.test(n)), "name pattern");
+  assert.equal(names.indexOf("005_duck_types.sql"), names.length - 1, "runs after 001-004");
+  const sql = migrations.find((m) => m.name === "005_duck_types.sql").sql;
+  assert.match(sql, /slug text NOT NULL UNIQUE/);
+  assert.match(sql, /accent IN \('gold', 'coral', 'mint', 'blue'\)/);
+  assert.match(sql, /ADD COLUMN type_id bigint REFERENCES duck_types/);
+  const backfill = sql.indexOf("UPDATE ducks SET type_id");
+  const notNull = sql.indexOf("ALTER COLUMN type_id SET NOT NULL");
+  assert.ok(backfill > 0 && notNull > backfill, "backfill before NOT NULL");
+  assert.match(sql, /CREATE INDEX ducks_type_id_idx ON ducks \(type_id\)/);
+  assert.doesNotMatch(sql, /CONCURRENTLY/, "runs inside the migrator transaction");
 });

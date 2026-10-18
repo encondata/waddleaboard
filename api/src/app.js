@@ -28,8 +28,11 @@ import {
 import {
   FIND_STATUSES,
   isDuckCode,
+  isTypeSlug,
   normalizeDuckCode,
   validateDuck,
+  validateDuckBatch,
+  validateDuckType,
   validateFind,
   validateNewUser,
   validatePhoto,
@@ -42,23 +45,50 @@ function photoUrl(find) {
   return find.imageUrl || null;
 }
 
+// An individual duck. `code` is its serial number; design fields fall back to its type.
 function publicDuck(duck) {
   return {
     code: duck.code,
+    serial: duck.code,
     name: duck.name,
-    color: duck.color,
-    accent: duck.accent,
+    color: duck.color || duck.typeColor || null,
+    accent: duck.accent || duck.typeAccent || null,
     status: duck.status,
-    story: duck.story,
+    story: duck.story || duck.typeStory || null,
     homePort: duck.homePort,
     ship: duck.ship,
     miles: duck.miles,
-    imageUrl: duck.imageUrl,
+    imageUrl: duck.imageUrl || duck.typeImageUrl || null,
     launchedAt: duck.createdAt,
     lastSeen: duck.lastSeen || null,
     findCount: duck.findCount ?? 0,
+    type: duck.typeSlug
+      ? {
+          slug: duck.typeSlug,
+          name: duck.typeName,
+          color: duck.typeColor,
+          accent: duck.typeAccent,
+          imageUrl: duck.typeImageUrl || null,
+        }
+      : null,
   };
 }
+
+function publicDuckType(type) {
+  return {
+    slug: type.slug,
+    name: type.name,
+    color: type.color,
+    accent: type.accent,
+    imageUrl: type.imageUrl || null,
+    story: type.story || null,
+    createdAt: type.createdAt,
+    duckCount: type.duckCount ?? 0,
+    findCount: type.findCount ?? 0,
+  };
+}
+
+const isUniqueViolation = (err) => err?.code === "23505";
 
 function publicFind(find) {
   return {
@@ -127,6 +157,19 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
     return duck;
   }
 
+  async function loadDuckType(slug) {
+    const type = isTypeSlug(slug) ? await store.findDuckTypeBySlug(slug) : null;
+    if (!type) throw notFound("No duck type has that name.", "duck_type_not_found");
+    return type;
+  }
+
+  async function ownerIdFor(username) {
+    if (!username) return null;
+    const owner = await store.getUserByUsername(username);
+    if (!owner) throw badRequest(`No user named ${username}.`, "unknown_owner");
+    return owner.id;
+  }
+
   // --- public ---
   router.get("/api/health", async (req, res) => {
     const check = async (fn) => {
@@ -152,6 +195,17 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
   router.get("/api/ducks/:code", async (req, res, { params }) => {
     const duck = await loadDuck(params.code);
     sendJson(res, 200, { duck: publicDuck(duck) });
+  });
+
+  router.get("/api/duck-types", async (req, res) => {
+    const types = await store.listDuckTypes();
+    sendJson(res, 200, { types: types.map(publicDuckType) });
+  });
+
+  router.get("/api/duck-types/:slug", async (req, res, { params }) => {
+    const type = await loadDuckType(params.slug);
+    const ducks = await store.listDucksByType(type.id);
+    sendJson(res, 200, { type: publicDuckType(type), ducks: ducks.map(publicDuck) });
   });
 
   router.get("/api/ducks/:code/finds", async (req, res, { params }) => {
@@ -331,17 +385,56 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
   router.post("/api/admin/ducks", async (req, res) => {
     await requireAdmin(req);
     const input = validateDuck(await readJson(req));
-    let ownerId = null;
-    if (input.owner) {
-      const owner = await store.getUserByUsername(input.owner);
-      if (!owner) throw badRequest(`No user named ${input.owner}.`, "unknown_owner");
-      ownerId = owner.id;
+    const ownerId = await ownerIdFor(input.owner);
+    let typeId;
+    let name = input.name;
+    if (input.type) {
+      const type = await store.findDuckTypeBySlug(input.type);
+      if (!type) throw badRequest(`No duck type named ${input.type}.`, "unknown_type");
+      typeId = type.id;
+      name = name || type.name;
     }
     if (await store.findDuckByCode(input.code)) {
       throw new HttpError(409, "duck_exists", `A duck with code ${input.code} already exists.`);
     }
-    const duck = await store.createDuck({ ...input, ownerId });
+    let duck;
+    try {
+      duck = await store.createDuck({ ...input, name, typeId, ownerId });
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new HttpError(409, "duck_exists", `A duck with code ${input.code} already exists.`);
+      throw err;
+    }
     sendJson(res, 201, { duck: { ...publicDuck(duck), owner: input.owner } });
+  });
+
+  router.post("/api/admin/duck-types", async (req, res) => {
+    await requireAdmin(req);
+    const input = validateDuckType(await readJson(req));
+    const type = await store.createDuckType(input);
+    if (!type) throw new HttpError(409, "duck_type_exists", `A duck type with slug ${input.slug} already exists.`);
+    sendJson(res, 201, { type: publicDuckType(type) });
+  });
+
+  router.post("/api/admin/duck-types/:slug/ducks", async (req, res, { params }) => {
+    await requireAdmin(req);
+    const body = await readJson(req);
+    const type = await loadDuckType(params.slug);
+    const input = validateDuckBatch(body);
+    const ownerId = await ownerIdFor(input.owner);
+    let ducks;
+    try {
+      ducks = await store.createDucksBatch({ typeId: type.id, count: input.count, prefix: input.prefix, ownerId });
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        throw new HttpError(409, "duck_exists", "Another registration took those serials. Please try again.");
+      }
+      throw err;
+    }
+    sendJson(res, 201, {
+      type: { slug: type.slug, name: type.name },
+      serials: ducks.map((d) => d.code),
+      ducks: ducks.map((d) => ({ ...publicDuck(d), owner: input.owner })),
+    });
   });
 
   router.post("/api/admin/users", async (req, res) => {

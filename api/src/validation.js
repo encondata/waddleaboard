@@ -8,6 +8,9 @@ export const FIND_STATUSES = ["pending", "approved", "rejected", "flagged"];
 
 const DUCK_CODE = /^[A-Z]{2,4}-\d{3,6}$/;
 const USERNAME = /^[A-Za-z0-9._-]{3,40}$/;
+const TYPE_SLUG = /^[a-z0-9-]{2,40}$/;
+const SERIAL_PREFIX = /^[A-Z]{2,4}$/;
+export const MAX_BATCH = 100;
 
 export function normalizeDuckCode(input) {
   const raw = String(input ?? "").trim().toUpperCase().replace(/\s+/g, "");
@@ -59,13 +62,39 @@ export function accentForColor(color) {
   return "gold";
 }
 
+export function isTypeSlug(slug) {
+  return typeof slug === "string" && TYPE_SLUG.test(slug);
+}
+
+// Lowercase, dash-separated slug from a display name ("Sunny Jr." -> "sunny-jr").
+export function slugify(name) {
+  const slug = String(name ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 36)
+    .replace(/-+$/, "");
+  return slug.length >= 2 ? slug : "duck";
+}
+
+function accentFor(fields, color) {
+  if (!fields.accent && !color) return null;
+  const accent = fields.accent ? String(fields.accent) : accentForColor(color);
+  if (!ACCENTS.includes(accent)) throw badRequest(`Accent must be one of ${ACCENTS.join(", ")}.`, "validation_failed");
+  return accent;
+}
+
+// With a `type` (slug), name and color are optional and inherited from the type.
 export function validateDuck(fields) {
   const code = normalizeDuckCode(fields.code);
   if (!isDuckCode(code)) throw badRequest("Duck code must look like DP-0427.", "validation_failed");
-  const name = text(fields, "name", "Name", { required: true, max: 40 });
-  const color = text(fields, "color", "Color", { required: true, max: 30 });
-  const accent = fields.accent ? String(fields.accent) : accentForColor(color);
-  if (!ACCENTS.includes(accent)) throw badRequest(`Accent must be one of ${ACCENTS.join(", ")}.`, "validation_failed");
+  const type = text(fields, "type", "Type", { max: 40 }) || null;
+  if (type !== null && !isTypeSlug(type)) {
+    throw badRequest("Type must be a slug of 2-40 lowercase letters, numbers or dashes.", "validation_failed");
+  }
+  const name = text(fields, "name", "Name", { required: !type, max: 40 }) || null;
+  const color = text(fields, "color", "Color", { required: !type, max: 30 }) || null;
+  const accent = accentFor(fields, color);
   const status = fields.status ? String(fields.status) : "Sailing";
   if (!DUCK_STATUSES.includes(status)) {
     throw badRequest(`Status must be one of ${DUCK_STATUSES.join(", ")}.`, "validation_failed");
@@ -77,6 +106,7 @@ export function validateDuck(fields) {
   }
   return {
     code,
+    type,
     name,
     color,
     accent,
@@ -88,6 +118,43 @@ export function validateDuck(fields) {
     imageUrl: text(fields, "imageUrl", "Image URL", { max: 300 }) || null,
     miles,
   };
+}
+
+export function validateDuckType(fields) {
+  const slug = typeof fields.slug === "string" ? fields.slug.trim() : "";
+  if (!TYPE_SLUG.test(slug)) {
+    throw badRequest("Slug must be 2-40 lowercase letters, numbers or dashes, like sunny.", "validation_failed");
+  }
+  const name = text(fields, "name", "Name", { required: true, max: 40 });
+  const color = text(fields, "color", "Color", { required: true, max: 30 });
+  return {
+    slug,
+    name,
+    color,
+    accent: accentFor(fields, color),
+    imageUrl: text(fields, "imageUrl", "Image URL", { max: 300 }) || null,
+    story: text(fields, "story", "Story", { max: 600 }) || null,
+  };
+}
+
+export function validateDuckBatch(fields) {
+  const raw = fields.count;
+  const count = typeof raw === "string" && /^\d+$/.test(raw.trim()) ? Number(raw) : raw;
+  if (typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > MAX_BATCH) {
+    throw badRequest(`Count must be a whole number from 1 to ${MAX_BATCH}.`, "validation_failed");
+  }
+  const prefixInput = text(fields, "prefix", "Prefix", { max: 4 }).toUpperCase();
+  const prefix = prefixInput || "DP";
+  if (!SERIAL_PREFIX.test(prefix)) throw badRequest("Prefix must be 2-4 letters, like DP.", "validation_failed");
+  return { count, prefix, owner: text(fields, "owner", "Owner", { max: 40 }) || null };
+}
+
+// Serials for the next `count` ducks after `highest` (the largest numeric suffix in use).
+export function nextSerials(prefix, highest, count) {
+  const start = (highest || 0) + 1;
+  const last = start + count - 1;
+  if (last > 999999) throw badRequest(`No room for ${count} more ${prefix} serials.`, "serials_exhausted");
+  return Array.from({ length: count }, (_, i) => `${prefix}-${String(start + i).padStart(4, "0")}`);
 }
 
 export function validateUsername(username) {
