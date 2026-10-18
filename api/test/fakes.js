@@ -92,7 +92,8 @@ export function createMemoryStore() {
   const findView = (f) => {
     const duck = db.ducks.find((d) => d.id === f.duckId);
     const photo = db.photos.find((p) => p.findId === f.id);
-    return { ...f, duckCode: duck.code, duckName: duck.name, photoId: photo?.id ?? null };
+    const type = db.types.find((t) => t.id === duck.typeId);
+    return { ...f, duckCode: duck.code, duckName: type.name, photoId: photo?.id ?? null };
   };
 
   return {

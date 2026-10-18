@@ -333,9 +333,11 @@ describe("duck types and individuals", () => {
 
   test("a duck's own design overrides its type", async () => {
     const type = await sunny();
-    await ctx.store.createDuck({ code: "DP-0431", typeId: type.id, name: "Pip", color: "Coral", accent: "coral", imageUrl: "/x.png", story: "Mine." });
-    const { data } = await api("/api/ducks/DP-0431");
-    assert.equal(data.duck.name, "Pip");
+    const pat = await ctx.store.getUserByUsername("pat");
+    await ctx.store.createDuck({ code: "DP-0431", typeId: type.id, name: "Pip", color: "Coral", accent: "coral", imageUrl: "/x.png", story: "Mine.", ownerId: pat.id });
+    const { cookie } = await login("pat", "owner-password");
+    const { data } = await api("/api/ducks/DP-0431", { cookie });
+    assert.equal(data.duck.name, "Sunny", "individuals carry the series name, not their own");
     assert.equal(data.duck.color, "Coral");
     assert.equal(data.duck.accent, "coral");
     assert.equal(data.duck.imageUrl, "/x.png");
@@ -345,13 +347,15 @@ describe("duck types and individuals", () => {
 
   test("individuals of one type keep separate guest books, status and counts", async () => {
     const type = await sunny();
-    await ctx.store.createDuck({ code: "DP-0428", typeId: type.id, name: "Sunny" });
+    const pat = await ctx.store.getUserByUsername("pat");
+    await ctx.store.createDuck({ code: "DP-0428", typeId: type.id, name: "Sunny", ownerId: pat.id });
     const sent = await api("/api/ducks/DP-0428/finds", { method: "POST", json: { name: "Maya", place: "Cozumel, Mexico", note: "Hi", rehidden: "yes" } });
     const { cookie } = await login("admin", "admin-password");
     assert.equal((await api(`/api/admin/finds/${sent.data.find.id}/approve`, { method: "POST", cookie })).status, 200);
 
-    const found = (await api("/api/ducks/DP-0428")).data.duck;
-    const other = (await api("/api/ducks/DP-0427")).data.duck;
+    const owner = await login("pat", "owner-password"); // both ducks are pat's, so pat sees full detail
+    const found = (await api("/api/ducks/DP-0428", { cookie: owner.cookie })).data.duck;
+    const other = (await api("/api/ducks/DP-0427", { cookie: owner.cookie })).data.duck;
     assert.deepEqual([found.findCount, found.lastSeen, found.status], [1, "Cozumel, Mexico", "Rehidden"]);
     assert.deepEqual([other.findCount, other.lastSeen, other.status], [0, null, "Sailing"]);
     assert.equal((await api("/api/ducks/DP-0427/finds")).data.finds.length, 0);
@@ -414,7 +418,8 @@ describe("duck types and individuals", () => {
       assert.equal(duck.type.slug, "sunny");
       assert.equal(duck.name, "Sunny");
       assert.equal(duck.color, "Marigold");
-      assert.equal(duck.status, "Sailing");
+      assert.equal(duck.private, true, "the admin is not the owner");
+      assert.equal((await ctx.store.findDuckByCode(duck.serial)).status, "Sailing");
     }
     assert.equal((await api("/api/ducks/DP-0431")).data.duck.type.slug, "sunny");
 
@@ -448,6 +453,10 @@ describe("duck types and individuals", () => {
     const same = await api("/api/admin/ducks", { method: "POST", cookie, json: { code: "DP-2001", name: "sunny", color: "marigold" } });
     assert.equal(same.status, 201, JSON.stringify(same.data));
     assert.equal(same.data.duck.type.slug, "sunny", "matched case-insensitively");
+    assert.equal(same.data.duck.name, "Sunny", "shown with the series' own name");
+    await api("/api/ducks/DP-2001/finds", { method: "POST", json: { name: "Maya", place: "Nassau", note: "hi" } });
+    const queue = await api("/api/admin/finds", { cookie });
+    assert.deepEqual(queue.data.finds[0].duck, { code: "DP-2001", name: "Sunny" }, "moderation shows series + serial");
     const fresh = await api("/api/admin/ducks", { method: "POST", cookie, json: { code: "DP-2002", name: "Sunny", color: "Blue" } });
     assert.equal(fresh.status, 201);
     assert.equal(fresh.data.duck.type.slug, "sunny-2", "slug suffix on collision");
@@ -462,7 +471,9 @@ describe("duck types and individuals", () => {
     assert.equal(r.data.duck.color, "Marigold");
     assert.equal(r.data.duck.type.slug, "sunny");
     const named = await api("/api/admin/ducks", { method: "POST", cookie, json: { code: "DP-0501", type: "sunny", name: "Pip" } });
-    assert.equal(named.data.duck.name, "Pip");
+    assert.equal(named.status, 201);
+    assert.equal(named.data.duck.name, "Sunny", "a per-duck name is not stored or exposed");
+    assert.doesNotMatch(JSON.stringify(named.data), /Pip/);
     const unknown = await api("/api/admin/ducks", { method: "POST", cookie, json: { code: "DP-0502", type: "nope" } });
     assertJsonError(unknown, 400);
     assert.equal(unknown.data.error.code, "unknown_type");
@@ -477,6 +488,88 @@ describe("duck types and individuals", () => {
     const { cookie } = await login("admin", "admin-password");
     await api("/api/admin/duck-types/sunny/ducks", { method: "POST", cookie, json: { count: 2 } });
     assert.equal((await api("/api/stats")).data.stats.ducks, 3);
+  });
+});
+
+describe("duck privacy", () => {
+  const PRIVATE = ["status", "homePort", "ship", "miles", "lastSeen"];
+  let pat;
+  let patDuck;
+  beforeEach(async () => {
+    pat = await ctx.store.getUserByUsername("pat");
+    const type = await ctx.store.findDuckTypeBySlug("sunny");
+    patDuck = await ctx.store.createDuck({
+      code: "DP-0600", typeId: type.id, name: "Pip", ownerId: pat.id, status: "At sea",
+      homePort: "Galveston", ship: "Harmony of the Seas", miles: 1284, story: "Pip lives with the Parkers in cabin 8123.",
+    });
+    const find = await ctx.store.createFind({ duckId: patDuck.id, finderName: "Maya", place: "Cozumel, Mexico", note: "Hi", rehidden: true });
+    await ctx.store.setFindStatus(find.id, "approved", 1, new Date());
+  });
+  const assertPrivate = (duck) => {
+    assert.equal(duck.private, true);
+    for (const key of PRIVATE) assert.equal(duck[key], null, `${key} hidden`);
+    assert.doesNotMatch(JSON.stringify(duck), /Galveston|Harmony|Cozumel|8123|1284|"pat"/);
+  };
+
+  test("anonymous viewers get the anonymized form; public identity and counts stay", async () => {
+    const { status, data } = await api("/api/ducks/DP-0600");
+    assert.equal(status, 200);
+    assertPrivate(data.duck);
+    assert.equal(data.duck.story, null, "owner story replaced by the type story");
+    assert.deepEqual([data.duck.serial, data.duck.name, data.duck.type.slug, data.duck.color, data.duck.findCount], ["DP-0600", "Sunny", "sunny", "Marigold", 1]);
+    assert.equal(data.duck.ownerId, undefined);
+    assert.equal(data.duck.owner, undefined);
+  });
+
+  test("the owner sees full detail on the duck page, type listing and My Flock", async () => {
+    const { cookie } = await login("pat", "owner-password");
+    const own = (await api("/api/ducks/DP-0600", { cookie })).data.duck;
+    assert.equal(own.private, false);
+    assert.deepEqual([own.status, own.homePort, own.ship, own.miles, own.lastSeen], ["Rehidden", "Galveston", "Harmony of the Seas", 1284, "Cozumel, Mexico"]);
+    assert.match(own.story, /cabin 8123/);
+    const flock = (await api("/api/my/ducks", { cookie })).data.ducks;
+    assert.ok(flock.every((d) => d.private === false));
+    assert.equal(flock.find((d) => d.code === "DP-0600").ship, "Harmony of the Seas");
+    const listed = (await api("/api/duck-types/sunny", { cookie })).data.ducks;
+    assert.equal(listed.find((d) => d.serial === "DP-0600").private, false);
+  });
+
+  test("other owners and admins get the anonymized form for ducks they do not own", async () => {
+    const { cookie: adminCookie } = await login("admin", "admin-password");
+    await api("/api/admin/users", { method: "POST", cookie: adminCookie, json: { username: "robin", password: "robin-password" } });
+    const robin = await login("robin", "robin-password");
+    assertPrivate((await api("/api/ducks/DP-0600", { cookie: robin.cookie })).data.duck);
+    assertPrivate((await api("/api/ducks/DP-0600", { cookie: adminCookie })).data.duck);
+
+    const adminRow = (await api("/api/admin/ducks", { cookie: adminCookie })).data.ducks.find((d) => d.code === "DP-0600");
+    assert.equal(adminRow.private, true);
+    for (const key of PRIVATE) assert.equal(adminRow[key], null);
+    assert.equal(adminRow.owner, "pat", "admins still see who owns a duck, to manage accounts");
+
+    const admin = await ctx.store.getUserByUsername("admin");
+    const type = await ctx.store.findDuckTypeBySlug("sunny");
+    await ctx.store.createDuck({ code: "DP-0601", typeId: type.id, name: "Sunny", ownerId: admin.id, ship: "Wonder of the Seas" });
+    const adminOwn = (await api("/api/ducks/DP-0601", { cookie: adminCookie })).data.duck;
+    assert.equal(adminOwn.private, false, "an admin's own flock keeps full detail");
+    assert.equal(adminOwn.ship, "Wonder of the Seas");
+  });
+
+  test("the public type listing anonymizes every duck the viewer does not own", async () => {
+    const anon = await api("/api/duck-types/sunny");
+    assert.ok(anon.data.ducks.length >= 2);
+    anon.data.ducks.forEach(assertPrivate);
+    assert.equal(anon.data.type.findCount, 1, "type-level counts stay public");
+    const { cookie } = await login("pat", "owner-password");
+    const mixed = (await api("/api/duck-types/sunny", { cookie })).data.ducks;
+    const unowned = await ctx.store.createDuck({ code: "DP-0602", typeId: (await ctx.store.findDuckTypeBySlug("sunny")).id, name: "Sunny" });
+    assert.ok(mixed.every((d) => d.private === false), "every listed sunny so far is pat's");
+    assertPrivate((await api(`/api/ducks/${unowned.code}`, { cookie })).data.duck);
+  });
+
+  test("the guest book itself stays public", async () => {
+    const finds = (await api("/api/ducks/DP-0600/finds")).data.finds;
+    assert.equal(finds.length, 1);
+    assert.equal(finds[0].place, "Cozumel, Mexico");
   });
 });
 

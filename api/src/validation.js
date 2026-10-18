@@ -84,7 +84,9 @@ function accentFor(fields, color) {
   return accent;
 }
 
-// With a `type` (slug), name and color are optional and inherited from the type.
+// Individuals have no name of their own: they are "<series name> · Serial <code>".
+// With a `type` (series slug), any `name` is ignored and color is optional (inherited).
+// Without one, `name` is the series name used to find or create the series.
 export function validateDuck(fields) {
   const code = normalizeDuckCode(fields.code);
   if (!isDuckCode(code)) throw badRequest("Duck code must look like DP-0427.", "validation_failed");
@@ -92,7 +94,7 @@ export function validateDuck(fields) {
   if (type !== null && !isTypeSlug(type)) {
     throw badRequest("Type must be a slug of 2-40 lowercase letters, numbers or dashes.", "validation_failed");
   }
-  const name = text(fields, "name", "Name", { required: !type, max: 40 }) || null;
+  const name = type ? null : text(fields, "name", "Series name", { required: true, max: 40 });
   const color = text(fields, "color", "Color", { required: !type, max: 30 }) || null;
   const accent = accentFor(fields, color);
   const status = fields.status ? String(fields.status) : "Sailing";

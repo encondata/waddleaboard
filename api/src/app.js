@@ -50,7 +50,8 @@ function publicDuck(duck) {
   return {
     code: duck.code,
     serial: duck.code,
-    name: duck.name,
+    // The series name. Individuals are identified by series + serial, not a name of their own.
+    name: duck.typeName || duck.name,
     color: duck.color || duck.typeColor || null,
     accent: duck.accent || duck.typeAccent || null,
     status: duck.status,
@@ -72,6 +73,24 @@ function publicDuck(duck) {
         }
       : null,
   };
+}
+
+// Trip details that can place a duck (and so its owner) on a ship, in a port or at home.
+// Only the duck's owner sees them; everyone else, admins included, gets the anonymized form.
+const PRIVATE_DUCK_FIELDS = ["status", "homePort", "ship", "miles", "lastSeen"];
+
+export function isDuckOwner(duck, viewer) {
+  return Boolean(viewer) && duck.ownerId !== null && duck.ownerId !== undefined && viewer.id === duck.ownerId;
+}
+
+// The one way ducks leave the API. `viewer` is the session user or null.
+export function duckForViewer(duck, viewer) {
+  const view = publicDuck(duck);
+  if (isDuckOwner(duck, viewer)) return { ...view, private: false };
+  for (const key of PRIVATE_DUCK_FIELDS) view[key] = null;
+  // An owner-written story can name ports or people; show the type's shared story instead.
+  view.story = duck.typeStory || null;
+  return { ...view, private: true };
 }
 
 function publicDuckType(type) {
@@ -194,7 +213,7 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
 
   router.get("/api/ducks/:code", async (req, res, { params }) => {
     const duck = await loadDuck(params.code);
-    sendJson(res, 200, { duck: publicDuck(duck) });
+    sendJson(res, 200, { duck: duckForViewer(duck, await currentUser(req)) });
   });
 
   router.get("/api/duck-types", async (req, res) => {
@@ -205,7 +224,8 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
   router.get("/api/duck-types/:slug", async (req, res, { params }) => {
     const type = await loadDuckType(params.slug);
     const ducks = await store.listDucksByType(type.id);
-    sendJson(res, 200, { type: publicDuckType(type), ducks: ducks.map(publicDuck) });
+    const viewer = await currentUser(req);
+    sendJson(res, 200, { type: publicDuckType(type), ducks: ducks.map((d) => duckForViewer(d, viewer)) });
   });
 
   router.get("/api/ducks/:code/finds", async (req, res, { params }) => {
@@ -346,7 +366,7 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
   router.get("/api/my/ducks", async (req, res) => {
     const user = await requireUser(req);
     const ducks = await store.listDucksByOwner(user.id);
-    sendJson(res, 200, { ducks: ducks.map(publicDuck) });
+    sendJson(res, 200, { ducks: ducks.map((d) => duckForViewer(d, user)) });
   });
 
   // --- admin ---
@@ -377,22 +397,22 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
   router.post("/api/admin/finds/:id/flag", moderate("flagged"));
 
   router.get("/api/admin/ducks", async (req, res) => {
-    await requireAdmin(req);
+    const admin = await requireAdmin(req);
     const ducks = await store.listDucks();
-    sendJson(res, 200, { ducks: ducks.map((d) => ({ ...publicDuck(d), owner: d.ownerUsername || null })) });
+    sendJson(res, 200, { ducks: ducks.map((d) => ({ ...duckForViewer(d, admin), owner: d.ownerUsername || null })) });
   });
 
   router.post("/api/admin/ducks", async (req, res) => {
-    await requireAdmin(req);
+    const admin = await requireAdmin(req);
     const input = validateDuck(await readJson(req));
     const ownerId = await ownerIdFor(input.owner);
     let typeId;
-    let name = input.name;
+    let name = input.name; // series name; for a typed create the series supplies it
     if (input.type) {
       const type = await store.findDuckTypeBySlug(input.type);
       if (!type) throw badRequest(`No duck type named ${input.type}.`, "unknown_type");
       typeId = type.id;
-      name = name || type.name;
+      name = type.name;
     }
     if (await store.findDuckByCode(input.code)) {
       throw new HttpError(409, "duck_exists", `A duck with code ${input.code} already exists.`);
@@ -404,7 +424,7 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
       if (isUniqueViolation(err)) throw new HttpError(409, "duck_exists", `A duck with code ${input.code} already exists.`);
       throw err;
     }
-    sendJson(res, 201, { duck: { ...publicDuck(duck), owner: input.owner } });
+    sendJson(res, 201, { duck: { ...duckForViewer(duck, admin), owner: input.owner } });
   });
 
   router.post("/api/admin/duck-types", async (req, res) => {
@@ -416,10 +436,9 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
   });
 
   router.post("/api/admin/duck-types/:slug/ducks", async (req, res, { params }) => {
-    await requireAdmin(req);
-    const body = await readJson(req);
+    const admin = await requireAdmin(req);
+    const input = validateDuckBatch(await readJson(req));
     const type = await loadDuckType(params.slug);
-    const input = validateDuckBatch(body);
     const ownerId = await ownerIdFor(input.owner);
     let ducks;
     try {
@@ -433,7 +452,7 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
     sendJson(res, 201, {
       type: { slug: type.slug, name: type.name },
       serials: ducks.map((d) => d.code),
-      ducks: ducks.map((d) => ({ ...publicDuck(d), owner: input.owner })),
+      ducks: ducks.map((d) => ({ ...duckForViewer(d, admin), owner: input.owner })),
     });
   });
 

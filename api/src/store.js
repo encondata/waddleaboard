@@ -25,9 +25,10 @@ const TYPE_SELECT = `
   FROM duck_types t`;
 
 const FIND_SELECT = `
-  SELECT f.*, p.id AS photo_id, d.code AS duck_code, d.name AS duck_name
+  SELECT f.*, p.id AS photo_id, d.code AS duck_code, t.name AS duck_name
   FROM finds f
   JOIN ducks d ON d.id = f.duck_id
+  JOIN duck_types t ON t.id = d.type_id
   LEFT JOIN photos p ON p.find_id = f.id`;
 
 const iso = (v) => (v instanceof Date ? v.toISOString() : v ?? null);

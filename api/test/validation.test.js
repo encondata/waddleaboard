@@ -72,7 +72,7 @@ test("validateNewUser checks username, password length and role", () => {
   assert.throws(() => validateNewUser({ username: "captain", password: "longenough", role: "root" }), /Role/);
 });
 
-test("validateDuck makes name and color optional when a type is given", () => {
+test("validateDuck takes no per-duck name; name is the series name only without a type", () => {
   const duck = validateDuck({ code: "DP-0500", type: "sunny" });
   assert.equal(duck.type, "sunny");
   assert.equal(duck.name, null);
@@ -80,7 +80,8 @@ test("validateDuck makes name and color optional when a type is given", () => {
   assert.equal(duck.accent, null, "inherited from the type");
   assert.equal(validateDuck({ code: "DP-0500", type: "sunny", color: "Coral" }).accent, "coral");
   assert.equal(validateDuck({ code: "DP-0500", name: "Pip", color: "Blue" }).type, null);
-  assert.throws(() => validateDuck({ code: "DP-0500" }), /Name is required/);
+  assert.equal(validateDuck({ code: "DP-0500", type: "sunny", name: "Pip" }).name, null, "a per-duck name is ignored");
+  assert.throws(() => validateDuck({ code: "DP-0500" }), /Series name is required/);
   assert.throws(() => validateDuck({ code: "DP-0500", name: "Pip" }), /Color is required/);
   assert.throws(() => validateDuck({ code: "DP-0500", type: "Sunny!" }), /Type must be/);
 });
