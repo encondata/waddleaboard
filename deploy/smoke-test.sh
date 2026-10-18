@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end smoke test against a running stack (needs curl).
 #   BASE_URL=http://localhost WADDLE_ADMIN_USER=admin WADDLE_ADMIN_PASSWORD=... deploy/smoke-test.sh
-# Creates a throwaway duck (DP-9xxx), an owner account and a find; safe to run repeatedly.
+# Creates a throwaway duck (DP-9xxx), duck type (smoke-xxx) with ZZ- serials, an owner account and a
+# find; safe to run repeatedly.
 set -euo pipefail
 
 BASE="${BASE_URL:-http://localhost}"
@@ -69,6 +70,26 @@ req POST /api/admin/users -H "cookie: $ADMIN_COOKIE" -H 'content-type: applicati
 expect 201 "admin creates owner $OWNER"
 req POST /api/admin/ducks -H "cookie: $ADMIN_COOKIE" -H 'content-type: application/json' --data "{\"code\":\"$CODE\",\"name\":\"Smokey\",\"color\":\"Blue\",\"owner\":\"$OWNER\"}"
 if [[ "$STATUS" == 409 ]]; then ok "duck $CODE already exists (re-run)"; else expect 201 "admin creates duck $CODE"; fi
+
+# Duck types and serials (needs migration 005)
+req GET "/api/ducks/$CODE"
+if grep -q "\"serial\":\"$CODE\"" "$WORK/body" && grep -q '"type":{"slug":"[a-z0-9-]*"' "$WORK/body"; then ok "duck $CODE has a serial and a type"; else bad "duck type/serial: $(head -c 300 "$WORK/body")"; fi
+req GET /api/duck-types
+expect 200 "GET /api/duck-types"
+TYPE_SLUG="smoke-$SUFFIX"
+req POST /api/admin/duck-types -H "cookie: $ADMIN_COOKIE" -H 'content-type: application/json' --data "{\"slug\":\"$TYPE_SLUG\",\"name\":\"Smoke\",\"color\":\"Blue\"}"
+if [[ "$STATUS" == 409 ]]; then ok "type $TYPE_SLUG already exists (re-run)"; else expect 201 "admin creates type $TYPE_SLUG"; fi
+req POST /api/admin/duck-types -H "cookie: $ADMIN_COOKIE" -H 'content-type: application/json' --data "{\"slug\":\"$TYPE_SLUG\",\"name\":\"Smoke\",\"color\":\"Blue\"}"
+expect_json_error 409 "duplicate type slug"
+req POST /api/admin/duck-types -H "cookie: $ADMIN_COOKIE" -H 'content-type: application/json' --data '{"slug":"Not A Slug","name":"X","color":"Blue"}'
+expect_json_error 400 "invalid type slug"
+req POST "/api/admin/duck-types/$TYPE_SLUG/ducks" -H "cookie: $ADMIN_COOKIE" -H 'content-type: application/json' --data '{"count":2,"prefix":"ZZ"}'
+expect 201 "batch-register 2 $TYPE_SLUG ducks"
+BATCH_SERIAL="$(sed -n 's/.*"serials":\["\([A-Z]*-[0-9]*\)".*/\1/p' "$WORK/body")"
+req POST "/api/admin/duck-types/$TYPE_SLUG/ducks" -H "cookie: $ADMIN_COOKIE" -H 'content-type: application/json' --data '{"count":0}'
+expect_json_error 400 "batch count 0"
+req GET "/api/duck-types/$TYPE_SLUG"
+if [[ "$STATUS" == 200 && -n "$BATCH_SERIAL" ]] && grep -q "\"serial\":\"$BATCH_SERIAL\"" "$WORK/body"; then ok "type page lists $BATCH_SERIAL"; else bad "type listing: $STATUS $(head -c 300 "$WORK/body")"; fi
 
 req POST /api/auth/login -H 'content-type: application/json' --data "{\"username\":\"$OWNER\",\"password\":\"owner-password-1\"}"
 expect 200 "owner login"

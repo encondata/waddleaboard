@@ -108,6 +108,7 @@ All errors have the shape `{ "error": { "code", "message" } }`.
 | `GET /api/health` | anyone (reports `db` and `storage`) |
 | `GET /api/stats` | anyone |
 | `GET /api/ducks/:code`, `GET /api/ducks/:code/finds` | anyone (approved finds only) |
+| `GET /api/duck-types`, `GET /api/duck-types/:slug` | anyone (types with duck and find counts; one type plus its ducks) |
 | `POST /api/ducks/:code/finds` | anyone; multipart (`name`, `place`, `spot`, `note`, `rehidden`, `photo`) or JSON. Creates a `pending` find |
 | `GET /api/photos/:id` | anyone for approved finds; admins for any |
 | `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me` | anyone |
@@ -115,6 +116,28 @@ All errors have the shape `{ "error": { "code", "message" } }`.
 | `GET /api/admin/stats`, `GET /api/admin/finds?status=open\|pending\|flagged\|approved\|rejected\|all` | admin |
 | `POST /api/admin/finds/:id/approve\|reject\|flag` | admin |
 | `GET /api/admin/ducks`, `POST /api/admin/ducks`, `POST /api/admin/users` | admin |
+| `POST /api/admin/duck-types`, `POST /api/admin/duck-types/:slug/ducks` | admin |
+
+### Duck types and individuals
+
+A **duck type** is a design, such as Sunny or Coral. It holds the shared name, color, accent,
+artwork and default story. Every physical duck is an **individual** of one type. Its code
+(`DP-0427`) is its serial number, and it has its own guest book, owner, status and miles. A
+duck's own color, accent, artwork or story overrides the type's when set. Duck JSON includes
+`serial` and `type: { slug, name, color, accent, imageUrl }`.
+
+- `POST /api/admin/duck-types` with `{ slug, name, color, accent?, imageUrl?, story? }` creates
+  a type. A slug is 2-40 lowercase letters, numbers or dashes. A duplicate slug returns 409
+  `duck_type_exists`.
+- `POST /api/admin/duck-types/:slug/ducks` with `{ count, prefix?, owner? }` registers `count`
+  (1-100) ducks of that type in one transaction. They get the next free serials after the highest
+  one under `prefix` (default `DP`), zero-padded to 4 digits, for example `DP-0429`, `DP-0430`. The
+  response lists the new `serials`.
+- `POST /api/admin/ducks` accepts an optional `type` slug. With a type, `name` and `color` are
+  optional and inherited. Without one, the duck joins the type with the same name and color, or a
+  new type is created for it.
+
+Migration `005_duck_types.sql` backfills existing ducks into types grouped by name and color.
 
 ## Notes
 
