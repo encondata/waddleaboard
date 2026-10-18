@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import {
   Anchor,
   ArrowRight,
   BadgeCheck,
+  Ban,
   Camera,
   Check,
   ChevronDown,
@@ -12,92 +13,43 @@ import {
   Flag,
   Heart,
   LifeBuoy,
+  LoaderCircle,
+  LogIn,
+  LogOut,
   Map,
   MapPin,
   Menu,
   PackageCheck,
+  Plus,
   QrCode,
   Search,
   Send,
   Ship,
   Sparkles,
   Stamp,
+  UserPlus,
   Users,
   Waves,
   X,
 } from "lucide-react";
+import { api } from "./api.js";
+import {
+  duckImage,
+  formatDate,
+  formatMonthYear,
+  formatNumber,
+  initials,
+  isDuckCode,
+  matchRoute,
+  normalizeDuckCode,
+  statusLine,
+  timeAgo,
+} from "./lib.js";
 
-const ducks = [
-  {
-    code: "DP-0427",
-    name: "Sunny",
-    color: "Marigold",
-    status: "Sailing",
-    location: "Cozumel, Mexico",
-    ship: "Harmony of the Seas",
-    miles: "1,284",
-    finds: 4,
-    image: "/assets/duckport/sunny-hero.png",
-    accent: "gold",
-  },
-  {
-    code: "DP-0912",
-    name: "Coral",
-    color: "Coral",
-    status: "On shore",
-    location: "Nassau, Bahamas",
-    ship: "Wonder of the Seas",
-    miles: "862",
-    finds: 3,
-    image: "/assets/duckport/coral-portrait.png",
-    accent: "coral",
-  },
-  {
-    code: "DP-1180",
-    name: "Minty",
-    color: "Seafoam",
-    status: "Rehidden",
-    location: "St. Thomas, USVI",
-    ship: "Celebrity Beyond",
-    miles: "2,016",
-    finds: 6,
-    image: "/assets/duckport/minty-portrait.png",
-    accent: "mint",
-  },
-  {
-    code: "DP-1564",
-    name: "Skipper",
-    color: "Blue",
-    status: "At sea",
-    location: "Caribbean Sea",
-    ship: "Carnival Jubilee",
-    miles: "734",
-    finds: 2,
-    image: "/assets/duckport/blue-portrait.png",
-    accent: "blue",
-  },
-];
+const FEATURED_DUCK = "/duck/DP-0427";
 
-const initialFinds = [
-  {
-    id: 1,
-    date: "October 12, 2026",
-    place: "Cozumel, Mexico",
-    spot: "Near the pool deck, after a very serious taco lunch",
-    finder: "The Ortega family",
-    note: "Sunny made our sea day! We signed the log and tucked him near a sunny window for the next explorer.",
-    image: "/assets/duckport/cozumel.png",
-  },
-  {
-    id: 2,
-    date: "October 8, 2026",
-    place: "Galveston, Texas",
-    spot: "Terminal 10, waiting to board",
-    finder: "Maya & Luis",
-    note: "Our first cruise duck! Sunny came aboard with us and started his big adventure before sail-away.",
-    image: "/assets/duckport/galveston.png",
-  },
-];
+const SessionContext = createContext({ user: null, loaded: false, setUser: () => {} });
+const useSession = () => useContext(SessionContext);
 
 const faq = [
   ["Do I have to rehide the duck?", "Nope. You can keep it as a souvenir or send it sailing again. If you rehide it, choose a safe public spot and avoid shops, pools, and crew-only areas."],
@@ -107,9 +59,12 @@ const faq = [
 ];
 
 function navigate(path) {
-  if (window.location.pathname !== path) window.history.pushState({}, "", path);
+  const current = window.location.pathname + window.location.search + window.location.hash;
+  if (current !== path) window.history.pushState({}, "", path);
   window.dispatchEvent(new PopStateEvent("popstate"));
-  window.scrollTo({ top: 0, behavior: "auto" });
+  const hash = path.split("#")[1];
+  if (hash) setTimeout(() => document.getElementById(hash)?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+  else window.scrollTo({ top: 0, behavior: "auto" });
 }
 
 function Logo({ onClick }) {
@@ -124,11 +79,18 @@ function Logo({ onClick }) {
 
 function Header({ route }) {
   const [open, setOpen] = useState(false);
+  const { user, setUser } = useSession();
   const go = (path) => { setOpen(false); navigate(path); };
+  const logout = async () => {
+    setOpen(false);
+    try { await api.logout(); } catch { /* the cookie is cleared server-side either way */ }
+    setUser(null);
+    navigate("/");
+  };
   const links = [
     ["/how-it-works", "How it works"],
     ["/my-flock", "My Flock"],
-    ["/duck/DP-0427", "Explore a journey"],
+    [FEATURED_DUCK, "Explore a journey"],
   ];
   return (
     <header className="site-header">
@@ -138,8 +100,11 @@ function Header({ route }) {
           {links.map(([path, label]) => (
             <button key={path} className={route === path ? "active" : ""} onClick={() => go(path)}>{label}</button>
           ))}
-          <button className="nav-admin" onClick={() => go("/admin")}>Admin demo</button>
-          <button className="nav-find" onClick={() => go("/duck/DP-0427")}><Search size={17} /> Find a duck</button>
+          {user?.role === "admin" && <button className={route === "/admin" ? "nav-admin active" : "nav-admin"} onClick={() => go("/admin")}>Admin</button>}
+          {user
+            ? <button className="nav-admin" onClick={logout}><LogOut size={16} /> Log out</button>
+            : <button className={route === "/login" ? "nav-admin active" : "nav-admin"} onClick={() => go("/login")}><LogIn size={16} /> Log in</button>}
+          <button className="nav-find" onClick={() => go("/#find")}><Search size={17} /> Find a duck</button>
         </nav>
         <button className="menu-button" onClick={() => setOpen(!open)} aria-label="Toggle menu">
           {open ? <X /> : <Menu />}
@@ -161,18 +126,18 @@ function Footer() {
           <h4>Explore</h4>
           <button onClick={() => navigate("/how-it-works")}>How it works</button>
           <button onClick={() => navigate("/my-flock")}>My Flock</button>
-          <button onClick={() => navigate("/duck/DP-0427")}>Sunny's journey</button>
+          <button onClick={() => navigate(FEATURED_DUCK)}>Sunny's journey</button>
         </div>
         <div>
           <h4>Community</h4>
           <button onClick={() => navigate("/how-it-works#kindness")}>Hiding safely</button>
           <button onClick={() => navigate("/how-it-works#faq")}>FAQ</button>
-          <button onClick={() => navigate("/admin")}>Admin demo</button>
+          <button onClick={() => navigate("/admin")}>Admin</button>
         </div>
         <div className="footer-note">
           <Waves size={36} />
           <strong>Made for curious travelers.</strong>
-          <span>Static prototype · no account needed</span>
+          <span>No account needed to sign a guest book</span>
         </div>
       </div>
       <div className="footer-bottom"><span>© 2026 Waddle Aboard</span><span>Keep it kind. Keep it sailing.</span></div>
@@ -181,30 +146,52 @@ function Footer() {
 }
 
 function DuckSearch({ compact = false }) {
-  const [code, setCode] = useState(compact ? "" : "DP-0427");
+  const [code, setCode] = useState("");
   const [error, setError] = useState("");
-  const submit = (event) => {
+  const [busy, setBusy] = useState(false);
+  const submit = async (event) => {
     event.preventDefault();
-    const normalized = code.trim().toUpperCase().replace(/\s/g, "");
-    if (["DP-0427", "0427", "SUNNY"].includes(normalized)) {
-      navigate("/duck/DP-0427");
-    } else {
-      setError("Try the sample code DP-0427");
+    const normalized = normalizeDuckCode(code);
+    if (!normalized) { setError("Enter the code printed under the QR, like DP-0427."); return; }
+    if (!isDuckCode(normalized)) { setError("Duck codes look like DP-0427."); return; }
+    setBusy(true);
+    try {
+      await api.duck(normalized);
+      navigate(`/duck/${normalized}`);
+    } catch (err) {
+      setError(err.status === 404 ? `We couldn't find duck ${normalized}. Check the code and try again.` : err.message);
+    } finally {
+      setBusy(false);
     }
   };
   return (
-    <form className={compact ? "duck-search compact" : "duck-search"} onSubmit={submit}>
+    <form className={compact ? "duck-search compact" : "duck-search"} onSubmit={submit} id={compact ? undefined : "find"}>
       <div className="search-label"><QrCode size={18} /> Found a duck?</div>
       <div className="search-row">
         <input value={code} onChange={(e) => { setCode(e.target.value); setError(""); }} placeholder="Enter duck code" aria-label="Duck code" />
-        <button type="submit">Open guest book <ArrowRight size={18} /></button>
+        <button type="submit" disabled={busy}>Open guest book <ArrowRight size={18} /></button>
       </div>
-      <span className={error ? "search-help error" : "search-help"}>{error || "The short code is printed right below the QR."}</span>
+      <span className={error ? "search-help error" : "search-help"} role={error ? "alert" : undefined}>{error || "The short code is printed right below the QR."}</span>
     </form>
   );
 }
 
+function Loading({ label = "Loading…" }) {
+  return <div className="loading-state" role="status"><LoaderCircle className="spin" size={28} /><span>{label}</span></div>;
+}
+
+function usePublicStats() {
+  const [stats, setStats] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api.stats().then((d) => live && setStats(d.stats)).catch(() => {});
+    return () => { live = false; };
+  }, []);
+  return stats;
+}
+
 function HomePage() {
+  const stats = usePublicStats();
   return (
     <>
       <main>
@@ -236,9 +223,9 @@ function HomePage() {
         </section>
 
         <section className="ticker" aria-label="Community stats">
-          <div><strong>2,806</strong><span>ducks sailing</span></div>
-          <i></i><div><strong>18,492</strong><span>guest-book entries</span></div>
-          <i></i><div><strong>64</strong><span>countries visited</span></div>
+          <div><strong>{formatNumber(stats?.ducks)}</strong><span>ducks sailing</span></div>
+          <i></i><div><strong>{formatNumber(stats?.finds)}</strong><span>guest-book entries</span></div>
+          <i></i><div><strong>{formatNumber(stats?.places)}</strong><span>places visited</span></div>
           <i></i><div><strong>∞</strong><span>tiny adventures</span></div>
         </section>
 
@@ -274,7 +261,7 @@ function HomePage() {
             <h2>A tiny travel log,<br />written by strangers.</h2>
             <p>Each scan adds a pin to the journey and a note to the guest book. Over time, one duck becomes a shared story between people who may never meet.</p>
             <blockquote>“Sunny made our sea day! We tucked him by a sunny window for the next explorer.”<cite>— The Ortega family</cite></blockquote>
-            <button className="primary" onClick={() => navigate("/duck/DP-0427")}>Explore Sunny's journey <ArrowRight size={18} /></button>
+            <button className="primary" onClick={() => navigate(FEATURED_DUCK)}>Explore Sunny's journey <ArrowRight size={18} /></button>
           </div>
         </section>
 
@@ -284,7 +271,7 @@ function HomePage() {
               <span className="eyebrow light"><Heart size={16} /> Your traveling collection</span>
               <h2>Meet My Flock.</h2>
               <p>Keep every duck you create or collect in one cheerful place. See its last stop, journey length, and newest guest-book entry.</p>
-              <button className="cream-button" onClick={() => navigate("/my-flock")}>View the sample flock <ArrowRight size={18} /></button>
+              <button className="cream-button" onClick={() => navigate("/my-flock")}>View your flock <ArrowRight size={18} /></button>
             </div>
             <div className="flock-image"><img src="/assets/duckport/my-flock.png" alt="A colorful flock of 3D printed ducks" /></div>
           </div>
@@ -295,30 +282,47 @@ function HomePage() {
   );
 }
 
-function AddFindModal({ onClose, onSave }) {
-  const [form, setForm] = useState({ name: "", place: "", note: "", rehidden: "yes" });
+function AddFindModal({ duck, onClose }) {
+  const [form, setForm] = useState({ name: "", place: "", spot: "", note: "", rehidden: "yes" });
+  const [photo, setPhoto] = useState(null);
   const [saved, setSaved] = useState(false);
-  const set = (key, value) => setForm({ ...form, [key]: value });
-  const submit = (e) => {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (key, value) => { setForm({ ...form, [key]: value }); setError(""); };
+  const submit = async (e) => {
     e.preventDefault();
     if (!form.name || !form.place || !form.note) return;
-    onSave(form); setSaved(true);
+    const body = new FormData();
+    for (const [key, value] of Object.entries(form)) body.set(key, value);
+    if (photo) body.set("photo", photo);
+    setBusy(true);
+    try {
+      await api.addFind(duck.code, body);
+      setSaved(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal" role="dialog" aria-modal="true" aria-label="Add your find">
         <button className="modal-close" onClick={onClose} aria-label="Close"><X /></button>
         {saved ? (
-          <div className="success-state"><div className="success-icon"><Check size={34} /></div><h2>Your chapter is in!</h2><p>Sunny's guest book has one more story. In the future, this entry would enter the moderation queue before publishing.</p><button className="primary" onClick={onClose}>Back to the journey</button></div>
+          <div className="success-state"><div className="success-icon"><Check size={34} /></div><h2>Your chapter is in!</h2><p>Thanks for signing {duck.name}'s guest book. A moderator will take a quick look, and your entry will appear in the journey once it's approved.</p><button className="primary" onClick={onClose}>Back to the journey</button></div>
         ) : (
           <form onSubmit={submit}>
-            <span className="eyebrow coral"><Stamp size={16} /> Sunny · DP-0427</span>
+            <span className="eyebrow coral"><Stamp size={16} /> {duck.name} · {duck.code}</span>
             <h2>Add your find</h2><p>Tell the next traveler where your paths crossed.</p>
-            <label>Your name or family nickname<input value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. The Parkers" required /></label>
-            <label>Where did you find Sunny?<input value={form.place} onChange={(e) => set("place", e.target.value)} placeholder="Ship, port, or city" required /></label>
-            <label>Leave a note<textarea value={form.note} onChange={(e) => set("note", e.target.value)} placeholder="A quick hello for the guest book…" rows="4" required /></label>
+            <label>Your name or family nickname<input value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. The Parkers" maxLength={80} required /></label>
+            <label>Where did you find {duck.name}?<input value={form.place} onChange={(e) => set("place", e.target.value)} placeholder="Ship, port, or city" maxLength={120} required /></label>
+            <label>The exact spot <span className="optional">(optional)</span><input value={form.spot} onChange={(e) => set("spot", e.target.value)} placeholder="e.g. Pool deck, by the towel stand" maxLength={160} /></label>
+            <label>Leave a note<textarea value={form.note} onChange={(e) => set("note", e.target.value)} placeholder="A quick hello for the guest book…" rows="4" maxLength={1000} required /></label>
+            <label className="photo-input"><span><Camera size={16} /> Add a photo <span className="optional">(optional · JPEG, PNG or WebP)</span></span><input type="file" accept="image/jpeg,image/png,image/webp" onChange={(e) => { setPhoto(e.target.files?.[0] || null); setError(""); }} /></label>
             <fieldset><legend>What happened next?</legend><label className="radio"><input type="radio" checked={form.rehidden === "yes"} onChange={() => set("rehidden", "yes")} /> Rehidden for another finder</label><label className="radio"><input type="radio" checked={form.rehidden === "no"} onChange={() => set("rehidden", "no")} /> Came home with me</label></fieldset>
-            <button className="primary wide" type="submit">Add to guest book <Send size={18} /></button>
+            {error && <p className="form-error" role="alert">{error}</p>}
+            <button className="primary wide" type="submit" disabled={busy}>{busy ? "Sending…" : "Add to guest book"} <Send size={18} /></button>
             <small className="privacy-note">Please don't include cabin numbers, last names, or contact details.</small>
           </form>
         )}
@@ -327,35 +331,58 @@ function AddFindModal({ onClose, onSave }) {
   );
 }
 
-function DuckPage() {
-  const [finds, setFinds] = useState(initialFinds);
+function DuckNotFound({ code }) {
+  return (
+    <><main className="not-found duck-not-found"><div><Compass size={46} /><h1>We can't find that duck.</h1><p>No duck with the code <strong>{code}</strong> is sailing with Waddle Aboard. Double-check the code printed under its QR label.</p><DuckSearch compact /></div></main><Footer /></>
+  );
+}
+
+function DuckPage({ code }) {
+  const [state, setState] = useState({ status: "loading" });
   const [modal, setModal] = useState(false);
-  const addFind = (form) => setFinds([{ id: Date.now(), date: "Just now", place: form.place, spot: form.rehidden === "yes" ? "Ready for the next traveler" : "Heading home with a new friend", finder: form.name, note: form.note, image: null }, ...finds]);
+  useEffect(() => {
+    let live = true;
+    const normalized = normalizeDuckCode(code);
+    setState({ status: "loading" });
+    Promise.all([api.duck(normalized), api.finds(normalized)])
+      .then(([d, f]) => live && setState({ status: "ready", duck: d.duck, finds: f.finds }))
+      .catch((err) => live && setState({ status: err.status === 404 ? "missing" : "error", error: err }));
+    return () => { live = false; };
+  }, [code]);
+
+  if (state.status === "loading") return <main className="duck-page"><Loading label="Opening the guest book…" /></main>;
+  if (state.status === "missing") return <DuckNotFound code={normalizeDuckCode(code)} />;
+  if (state.status === "error") return <><main className="not-found"><div><LifeBuoy size={46} /><h1>Choppy waters.</h1><p>{state.error.message}</p><button className="primary" onClick={() => window.location.reload()}>Try again</button></div></main><Footer /></>;
+
+  const { duck, finds } = state;
+  const lastSeen = duck.lastSeen || duck.homePort;
   return (
     <>
       <main className="duck-page">
         <section className="duck-hero">
-          <div className="duck-portrait"><img src="/assets/duckport/sunny-hero.png" alt="Sunny the yellow cruise duck" /><span className="photo-tape"></span></div>
+          <div className="duck-portrait"><img src={duckImage(duck)} alt={`${duck.name} the ${duck.color.toLowerCase()} cruise duck`} /><span className="photo-tape"></span></div>
           <div className="duck-summary">
-            <span className="eyebrow mint"><span className="status-dot"></span> Currently sailing</span>
-            <h1>Meet Sunny.</h1>
-            <p className="duck-code">Duck <strong>DP-0427</strong> · Launched October 2026</p>
-            <p>Sunny began his voyage in Galveston with one mission: collect bright stories from kind people around the world.</p>
+            <span className="eyebrow mint"><span className="status-dot"></span> {statusLine(duck.status)}</span>
+            <h1>Meet {duck.name}.</h1>
+            <p className="duck-code">Duck <strong>{duck.code}</strong>{duck.launchedAt && <> · Launched {formatMonthYear(duck.launchedAt)}</>}</p>
+            <p>{duck.story || `${duck.name} is out collecting bright stories from kind people around the world.`}</p>
             <div className="stat-grid">
-              <div><MapPin /><strong>Cozumel</strong><span>last seen</span></div>
-              <div><Stamp /><strong>{finds.length + 2} finds</strong><span>guest book</span></div>
-              <div><Waves /><strong>1,284 mi</strong><span>traveled</span></div>
+              <div><MapPin /><strong>{lastSeen ? lastSeen.split(",")[0] : "Not yet"}</strong><span>last seen</span></div>
+              <div><Stamp /><strong>{duck.findCount} {duck.findCount === 1 ? "find" : "finds"}</strong><span>guest book</span></div>
+              <div><Waves /><strong>{formatNumber(duck.miles)} mi</strong><span>traveled</span></div>
             </div>
-            <button className="primary" onClick={() => setModal(true)}><Stamp size={18} /> I found Sunny</button>
+            <button className="primary" onClick={() => setModal(true)}><Stamp size={18} /> I found {duck.name}</button>
           </div>
         </section>
-        <section className="route-strip">
-          <div><span className="route-pin start"><Ship /></span><strong>Galveston</strong><small>Journey started</small></div>
-          <i className="route-line"></i>
-          <div><span className="route-pin"><Anchor /></span><strong>At sea</strong><small>Aboard Harmony</small></div>
-          <i className="route-line"></i>
-          <div><span className="route-pin current"><MapPin /></span><strong>Cozumel</strong><small>Latest sighting</small></div>
-        </section>
+        {(duck.homePort || duck.ship || duck.lastSeen) && (
+          <section className="route-strip">
+            <div><span className="route-pin start"><Ship /></span><strong>{duck.homePort || "Home port"}</strong><small>Journey started</small></div>
+            <i className="route-line"></i>
+            <div><span className="route-pin"><Anchor /></span><strong>At sea</strong><small>{duck.ship ? `Aboard ${duck.ship.split(" ")[0]}` : "Between ports"}</small></div>
+            <i className="route-line"></i>
+            <div><span className="route-pin current"><MapPin /></span><strong>{duck.lastSeen ? duck.lastSeen.split(",")[0] : "Next stop?"}</strong><small>Latest sighting</small></div>
+          </section>
+        )}
         <section className="guestbook-layout section">
           <div className="guestbook-main">
             <div className="section-heading"><span className="eyebrow coral"><Feather size={16} /> The guest book</span><h2>Notes from the journey</h2><p>Every entry is a small connection between one finder and the next.</p></div>
@@ -365,43 +392,80 @@ function DuckPage() {
                   <div className="timeline-marker">{idx === 0 ? <Sparkles /> : <MapPin />}</div>
                   <div className="entry-card">
                     <div className="entry-content">
-                      <span className="entry-date">{find.date}</span><h3>{find.place}</h3><p className="entry-spot">{find.spot}</p><blockquote>“{find.note}”</blockquote><span className="finder">— {find.finder}</span>
+                      <span className="entry-date">{formatDate(find.date)}</span><h3>{find.place}</h3><p className="entry-spot">{find.spot || (find.rehidden ? "Ready for the next traveler" : "Heading home with a new friend")}</p><blockquote>“{find.note}”</blockquote><span className="finder">— {find.finder}</span>
                     </div>
-                    {find.image && <img src={find.image} alt={`Sunny in ${find.place}`} />}
+                    {find.photoUrl && <img src={find.photoUrl} alt={`${duck.name} in ${find.place}`} loading="lazy" />}
                   </div>
                 </article>
               ))}
             </div>
+            {!finds.length && <div className="empty-state">No guest-book entries yet. Found {duck.name}? Be the first to sign!</div>}
           </div>
           <aside className="journey-aside">
-            <div className="aboard-card"><Ship size={28} /><span>Currently aboard</span><strong>Harmony of the Seas</strong><small>Western Caribbean sailing</small></div>
-            <div className="kind-card"><Heart size={25} /><h3>Keep the story going</h3><p>If you rehide Sunny, choose a safe public spot and never place a duck in shops, pools, or crew-only areas.</p><button onClick={() => navigate("/how-it-works#kindness")}>Read the kindness code <ArrowRight size={16} /></button></div>
+            {duck.ship && <div className="aboard-card"><Ship size={28} /><span>Currently aboard</span><strong>{duck.ship}</strong><small>{duck.status === "At sea" ? "Somewhere at sea" : "Sailing between ports"}</small></div>}
+            <div className="kind-card"><Heart size={25} /><h3>Keep the story going</h3><p>If you rehide {duck.name}, choose a safe public spot and never place a duck in shops, pools, or crew-only areas.</p><button onClick={() => navigate("/how-it-works#kindness")}>Read the kindness code <ArrowRight size={16} /></button></div>
           </aside>
         </section>
       </main>
       <Footer />
-      {modal && <AddFindModal onClose={() => setModal(false)} onSave={addFind} />}
+      {modal && <AddFindModal duck={duck} onClose={() => setModal(false)} />}
     </>
   );
 }
 
+function SignInPrompt({ title, copy, next }) {
+  return (
+    <div className="empty-state sign-in-prompt">
+      <h3>{title}</h3>
+      <p>{copy}</p>
+      <button className="primary" onClick={() => navigate(`/login?next=${encodeURIComponent(next)}`)}><LogIn size={18} /> Log in</button>
+    </div>
+  );
+}
+
 function FlockPage() {
+  const { user, loaded } = useSession();
   const [filter, setFilter] = useState("All ducks");
+  const [state, setState] = useState({ status: "idle", ducks: [] });
+  useEffect(() => {
+    if (!user) return undefined;
+    let live = true;
+    setState({ status: "loading", ducks: [] });
+    api.myDucks()
+      .then((d) => live && setState({ status: "ready", ducks: d.ducks }))
+      .catch((err) => live && setState({ status: "error", ducks: [], error: err }));
+    return () => { live = false; };
+  }, [user]);
+  const ducks = state.ducks;
   const visible = filter === "All ducks" ? ducks : ducks.filter((duck) => duck.status === filter);
+  const totalFinds = ducks.reduce((sum, d) => sum + d.findCount, 0);
+  const totalMiles = ducks.reduce((sum, d) => sum + (d.miles || 0), 0);
+  const summary = user && state.status === "ready"
+    ? `${ducks.length} tiny ${ducks.length === 1 ? "traveler" : "travelers"}. ${totalFinds} guest-book ${totalFinds === 1 ? "note" : "notes"}. One very colorful map.`
+    : "Keep every duck you create or collect in one cheerful place.";
   return (
     <><main>
-      <section className="page-hero flock-hero"><div><span className="eyebrow light"><Heart size={16} /> Your traveling collection</span><h1>My Flock</h1><p>Four tiny travelers. Fifteen guest-book notes. One very colorful map.</p></div><div className="flock-stats"><div><strong>4</strong><span>ducks</span></div><div><strong>15</strong><span>finds</span></div><div><strong>4,896</strong><span>miles</span></div></div></section>
+      <section className="page-hero flock-hero"><div><span className="eyebrow light"><Heart size={16} /> Your traveling collection</span><h1>My Flock</h1><p>{summary}</p></div><div className="flock-stats"><div><strong>{user ? ducks.length : "—"}</strong><span>ducks</span></div><div><strong>{user ? totalFinds : "—"}</strong><span>finds</span></div><div><strong>{user ? formatNumber(totalMiles) : "—"}</strong><span>miles</span></div></div></section>
       <section className="section flock-list">
-        <div className="flock-toolbar"><div><h2>Where they are now</h2><p>Last updated from the sample guest books.</p></div><div className="filter-pills">{["All ducks", "Sailing", "Rehidden", "At sea"].map((name) => <button className={filter === name ? "selected" : ""} onClick={() => setFilter(name)} key={name}>{name}</button>)}</div></div>
-        <div className="duck-grid">
-          {visible.map((duck) => <article className={`duck-card ${duck.accent}`} key={duck.code}>
-            <div className="duck-card-image"><img src={duck.image} alt={`${duck.name}, a ${duck.color} duck`} /><span>{duck.status}</span></div>
-            <div className="duck-card-body"><div className="duck-card-title"><div><h3>{duck.name}</h3><span>{duck.code}</span></div><span className="color-dot"></span></div><p><MapPin size={16} /> {duck.location}</p><p><Ship size={16} /> {duck.ship}</p><div className="duck-card-stats"><span><strong>{duck.finds}</strong> finds</span><span><strong>{duck.miles}</strong> miles</span></div><button onClick={() => navigate("/duck/DP-0427")}>Open guest book <ArrowRight size={17} /></button></div>
-          </article>)}
-        </div>
-        {!visible.length && <div className="empty-state">No ducks are on shore right now. They're a restless little flock.</div>}
+        {!loaded || state.status === "loading" ? <Loading label="Rounding up your flock…" /> : !user ? (
+          <SignInPrompt title="Log in to see your flock" copy="Duck owners can follow every duck they've launched. Finders don't need an account to sign a guest book." next="/my-flock" />
+        ) : state.status === "error" ? (
+          <div className="empty-state">{state.error.message}</div>
+        ) : (
+          <>
+            <div className="flock-toolbar"><div><h2>Where they are now</h2><p>Updated from approved guest-book entries.</p></div><div className="filter-pills">{["All ducks", "Sailing", "Rehidden", "At sea"].map((name) => <button className={filter === name ? "selected" : ""} onClick={() => setFilter(name)} key={name}>{name}</button>)}</div></div>
+            <div className="duck-grid">
+              {visible.map((duck) => <article className={`duck-card ${duck.accent}`} key={duck.code}>
+                <div className="duck-card-image"><img src={duckImage(duck)} alt={`${duck.name}, a ${duck.color} duck`} /><span>{duck.status}</span></div>
+                <div className="duck-card-body"><div className="duck-card-title"><div><h3>{duck.name}</h3><span>{duck.code}</span></div><span className="color-dot"></span></div><p><MapPin size={16} /> {duck.lastSeen || duck.homePort || "Waiting for a first find"}</p>{duck.ship && <p><Ship size={16} /> {duck.ship}</p>}<div className="duck-card-stats"><span><strong>{duck.findCount}</strong> finds</span><span><strong>{formatNumber(duck.miles)}</strong> miles</span></div><button onClick={() => navigate(`/duck/${duck.code}`)}>Open guest book <ArrowRight size={17} /></button></div>
+              </article>)}
+            </div>
+            {!ducks.length && <div className="empty-state">No ducks in your flock yet. Ask a Waddle Aboard admin to register your first traveler.</div>}
+            {!!ducks.length && !visible.length && <div className="empty-state">No ducks match that filter right now. They're a restless little flock.</div>}
+          </>
+        )}
       </section>
-      <section className="cta-band"><div><span className="eyebrow"><QrCode size={16} /> Growing the flock</span><h2>Have a new duck ready to sail?</h2><p>Registration and printable QR labels are coming in the account-enabled release.</p></div><button onClick={() => navigate("/how-it-works")}>See what you'll need <ArrowRight size={18} /></button></section>
+      <section className="cta-band"><div><span className="eyebrow"><QrCode size={16} /> Growing the flock</span><h2>Have a new duck ready to sail?</h2><p>Printable QR labels are coming soon. For now, an admin can register your duck's code.</p></div><button onClick={() => navigate("/how-it-works")}>See what you'll need <ArrowRight size={18} /></button></section>
     </main><Footer /></>
   );
 }
@@ -423,21 +487,158 @@ function HowPage() {
   );
 }
 
+function ProvisionCard({ onCreated }) {
+  const [duck, setDuck] = useState({ code: "", name: "", color: "", owner: "" });
+  const [owner, setOwner] = useState({ username: "", password: "" });
+  const [message, setMessage] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const run = async (fn, ok) => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await fn();
+      setMessage({ ok: true, text: ok });
+      onCreated?.();
+      return true;
+    } catch (err) {
+      setMessage({ ok: false, text: err.message });
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const addDuck = async (e) => {
+    e.preventDefault();
+    const code = normalizeDuckCode(duck.code);
+    if (await run(() => api.createDuck({ ...duck, code, owner: duck.owner || undefined }), `Duck ${code} is ready to sail.`)) {
+      setDuck({ code: "", name: "", color: "", owner: "" });
+    }
+  };
+  const addOwner = async (e) => {
+    e.preventDefault();
+    if (await run(() => api.createUser({ ...owner, role: "owner" }), `Owner ${owner.username} can now log in.`)) {
+      setOwner({ username: "", password: "" });
+    }
+  };
+  return (
+    <div className="admin-card admin-form">
+      <h3>Register a duck</h3>
+      <form onSubmit={addDuck}>
+        <label>Duck code<input value={duck.code} onChange={(e) => setDuck({ ...duck, code: e.target.value })} placeholder="DP-0428" required /></label>
+        <label>Name<input value={duck.name} onChange={(e) => setDuck({ ...duck, name: e.target.value })} placeholder="Sunny" maxLength={40} required /></label>
+        <label>Color<input value={duck.color} onChange={(e) => setDuck({ ...duck, color: e.target.value })} placeholder="Marigold" maxLength={30} required /></label>
+        <label>Owner username <span className="optional">(optional)</span><input value={duck.owner} onChange={(e) => setDuck({ ...duck, owner: e.target.value })} placeholder="pat" maxLength={40} /></label>
+        <button type="submit" disabled={busy}><Plus size={16} /> Add duck</button>
+      </form>
+      <h3>Add an owner</h3>
+      <form onSubmit={addOwner}>
+        <label>Username<input value={owner.username} onChange={(e) => setOwner({ ...owner, username: e.target.value })} autoComplete="off" required /></label>
+        <label>Temporary password<input type="password" value={owner.password} onChange={(e) => setOwner({ ...owner, password: e.target.value })} autoComplete="new-password" minLength={8} required /></label>
+        <button type="submit" disabled={busy}><UserPlus size={16} /> Add owner</button>
+      </form>
+      {message && <p className={message.ok ? "form-ok" : "form-error"} role="status">{message.text}</p>}
+    </div>
+  );
+}
+
 function AdminPage() {
-  const [entries, setEntries] = useState([
-    { id: 1, finder: "The Parkers", duck: "Sunny", place: "Costa Maya, Mexico", time: "12 min ago", status: "Pending" },
-    { id: 2, finder: "Jules & Sam", duck: "Coral", place: "Nassau, Bahamas", time: "48 min ago", status: "Pending" },
-    { id: 3, finder: "Nana B.", duck: "Minty", place: "St. Thomas, USVI", time: "2 hr ago", status: "Flagged" },
-  ]);
-  const approve = (id) => setEntries(entries.map((e) => e.id === id ? { ...e, status: "Approved" } : e));
+  const { user, loaded } = useSession();
+  const [filter, setFilter] = useState("open");
+  const [stats, setStats] = useState(null);
+  const [entries, setEntries] = useState(null);
+  const [error, setError] = useState("");
+  const isAdmin = user?.role === "admin";
+
+  const refresh = useCallback(async () => {
+    try {
+      const [s, f] = await Promise.all([api.adminStats(), api.adminFinds(filter)]);
+      setStats(s.stats);
+      setEntries(f.finds);
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }, [filter]);
+
+  useEffect(() => { if (isAdmin) refresh(); }, [isAdmin, refresh]);
+
+  const act = async (id, action) => {
+    try {
+      const { find } = await api.moderate(id, action);
+      setEntries((list) => list.map((e) => (e.id === id ? find : e)));
+      const s = await api.adminStats();
+      setStats(s.stats);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  if (!loaded) return <main className="admin-page"><Loading /></main>;
+  if (!user) return <><main className="admin-page"><SignInPrompt title="Admins only" copy="Log in with your admin account to moderate guest-book entries." next="/admin" /></main><Footer /></>;
+  if (!isAdmin) return <><main className="admin-page"><div className="empty-state"><h3>Admins only</h3><p>You're logged in as {user.username}, which doesn't have admin access.</p><button className="primary" onClick={() => navigate("/my-flock")}>Go to My Flock</button></div></main><Footer /></>;
+
+  const fleet = stats?.fleet || { total: 0, active: 0, quiet: 0, retired: 0 };
+  const activePct = fleet.total ? Math.round((fleet.active / fleet.total) * 100) : 0;
+  const name = user.displayName || user.username;
+  const open = (entries || []).filter((e) => e.status === "pending" || e.status === "flagged").length;
   return (
     <><main className="admin-page">
-      <section className="admin-header"><div><span className="eyebrow mint"><BadgeCheck size={16} /> Static admin preview</span><h1>Good morning, Captain.</h1><p>Here's what's happening across Waddle Aboard today.</p></div><div className="admin-profile"><span>JD</span><div><strong>Jamie Duckworth</strong><small>Community admin</small></div></div></section>
-      <section className="admin-stats">{[[Users,"2,806","Active ducks","+12 this week"],[Stamp,"18,492","Guest-book entries","+94 this week"],[MapPin,"64","Countries reached","+2 this month"],[Flag,"3","Needs review","Moderation queue"]].map(([Icon,num,label,meta])=><article key={label}><Icon /><div><strong>{num}</strong><span>{label}</span><small>{meta}</small></div></article>)}</section>
-      <section className="admin-grid"><div className="moderation-panel"><div className="panel-heading"><div><h2>Moderation queue</h2><p>Recent guest-book entries awaiting review.</p></div><span>{entries.filter(e=>e.status==="Pending"||e.status==="Flagged").length} open</span></div><div className="admin-table"><div className="table-head"><span>Finder</span><span>Duck & location</span><span>Submitted</span><span>Status</span><span></span></div>{entries.map(entry=><div className="table-row" key={entry.id}><span><strong>{entry.finder}</strong></span><span><strong>{entry.duck}</strong><small>{entry.place}</small></span><span>{entry.time}</span><span><b className={`status ${entry.status.toLowerCase()}`}>{entry.status}</b></span><span>{entry.status!=="Approved"?<button onClick={()=>approve(entry.id)}><Check size={16}/> Approve</button>:<BadgeCheck size={20}/>}</span></div>)}</div></div>
-        <aside className="admin-aside"><div className="admin-card"><h3>Fleet health</h3><div className="donut"><span><strong>92%</strong><small>active</small></span></div><ul><li><i className="live"></i>Active <strong>2,582</strong></li><li><i className="quiet"></i>Quiet 30+ days <strong>196</strong></li><li><i className="retired"></i>Retired <strong>28</strong></li></ul></div><div className="admin-card quick"><h3>Quick actions</h3><button><QrCode/> Generate label batch</button><button><LifeBuoy/> Review reported entries</button><button onClick={()=>navigate("/duck/DP-0427")}><Search/> View public journey</button></div></aside>
+      <section className="admin-header"><div><span className="eyebrow mint"><BadgeCheck size={16} /> Community admin</span><h1>Good morning, Captain.</h1><p>Here's what's happening across Waddle Aboard today.</p></div><div className="admin-profile"><span>{initials(name)}</span><div><strong>{name}</strong><small>Community admin</small></div></div></section>
+      <section className="admin-stats">{[[Users, stats?.activeDucks, "Active ducks", `+${stats?.ducksThisWeek ?? 0} this week`], [Stamp, stats?.approvedFinds, "Guest-book entries", `+${stats?.findsThisWeek ?? 0} submitted this week`], [MapPin, stats?.places, "Places visited", "From approved finds"], [Flag, stats?.needsReview, "Needs review", "Moderation queue"]].map(([Icon, num, label, meta]) => <article key={label}><Icon /><div><strong>{formatNumber(num)}</strong><span>{label}</span><small>{meta}</small></div></article>)}</section>
+      {error && <p className="form-error admin-error" role="alert">{error}</p>}
+      <section className="admin-grid"><div className="moderation-panel"><div className="panel-heading"><div><h2>Moderation queue</h2><p>{filter === "open" ? "Guest-book entries awaiting review." : filter === "flagged" ? "Entries flagged for a closer look." : "Every guest-book entry."}</p></div><span>{open} open</span></div>
+        <div className="filter-pills queue-filter">{[["open", "Open"], ["flagged", "Flagged"], ["all", "All"]].map(([key, label]) => <button key={key} className={filter === key ? "selected" : ""} onClick={() => setFilter(key)}>{label}</button>)}</div>
+        <div className="admin-table"><div className="table-head"><span>Finder</span><span>Duck & location</span><span>Submitted</span><span>Status</span><span></span></div>
+          {entries === null && <Loading />}
+          {entries?.length === 0 && <div className="table-empty">Nothing waiting. The guest books are shipshape.</div>}
+          {entries?.map((entry) => <div className="table-row" key={entry.id}>
+            <span><strong>{entry.finder}</strong><small title={entry.note}>“{entry.note}”</small>{entry.photoUrl && <a href={entry.photoUrl} target="_blank" rel="noreferrer" className="photo-link"><Camera size={13} /> Photo</a>}</span>
+            <span><strong>{entry.duck.name}</strong><small>{entry.place}{entry.spot ? ` · ${entry.spot}` : ""}</small></span>
+            <span>{timeAgo(entry.date)}</span>
+            <span><b className={`status ${entry.status}`}>{entry.status[0].toUpperCase() + entry.status.slice(1)}</b></span>
+            <span className="row-actions">{entry.status !== "approved" ? <button onClick={() => act(entry.id, "approve")}><Check size={16} /> Approve</button> : <BadgeCheck size={20} />}{entry.status === "pending" && <button className="flag" onClick={() => act(entry.id, "flag")} aria-label={`Flag entry from ${entry.finder}`}><Flag size={14} /></button>}{entry.status !== "rejected" && <button className="reject" onClick={() => act(entry.id, "reject")} aria-label={`Reject entry from ${entry.finder}`}><Ban size={14} /></button>}</span>
+          </div>)}
+        </div></div>
+        <aside className="admin-aside"><div className="admin-card"><h3>Fleet health</h3><div className="donut" style={{ background: `conic-gradient(var(--mint) 0 ${activePct}%, #e6ebef ${activePct}%)` }}><span><strong>{activePct}%</strong><small>active</small></span></div><ul><li><i className="live"></i>Active <strong>{formatNumber(fleet.active)}</strong></li><li><i className="quiet"></i>Quiet 30+ days <strong>{formatNumber(fleet.quiet)}</strong></li><li><i className="retired"></i>Retired or adopted <strong>{formatNumber(fleet.retired)}</strong></li></ul></div><div className="admin-card quick"><h3>Quick actions</h3><button disabled title="Coming soon"><QrCode /> Generate label batch · coming soon</button><button onClick={() => setFilter("flagged")}><LifeBuoy /> Review reported entries</button><button onClick={() => navigate(FEATURED_DUCK)}><Search /> View public journey</button></div><ProvisionCard onCreated={refresh} /></aside>
       </section>
-      <section className="static-notice"><Sparkles/><div><strong>This is a working static admin demo.</strong><span>Approvals update in this browser session. Roles, authentication, persistence, exports, and moderation rules will connect when the backend is added.</span></div></section>
+      <section className="static-notice"><Sparkles /><div><strong>New entries wait here until you approve them.</strong><span>Approved entries appear in the duck's public guest book right away. Rejected and flagged entries stay hidden.</span></div></section>
+    </main><Footer /></>
+  );
+}
+
+function LoginPage() {
+  const { setUser } = useSession();
+  const [form, setForm] = useState({ username: "", password: "" });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const next = new URLSearchParams(window.location.search).get("next");
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const { user } = await api.login(form.username, form.password);
+      setUser(user);
+      const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : null;
+      navigate(safeNext || (user.role === "admin" ? "/admin" : "/my-flock"));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <><main className="login-page">
+      <div className="modal auth-card">
+        <form onSubmit={submit}>
+          <span className="eyebrow coral"><LogIn size={16} /> Owners & admins</span>
+          <h2>Welcome aboard</h2><p>Log in to manage your flock or moderate guest books. Finders never need an account.</p>
+          <label>Username<input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} autoComplete="username" required /></label>
+          <label>Password<input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} autoComplete="current-password" required /></label>
+          {error && <p className="form-error" role="alert">{error}</p>}
+          <button className="primary wide" type="submit" disabled={busy}>{busy ? "Logging in…" : "Log in"} <ArrowRight size={18} /></button>
+        </form>
+      </div>
     </main><Footer /></>
   );
 }
@@ -448,14 +649,22 @@ function NotFound() {
 
 export function App() {
   const [route, setRoute] = useState(window.location.pathname);
+  const [user, setUser] = useState(null);
+  const [loaded, setLoaded] = useState(false);
   useEffect(() => { const update = () => setRoute(window.location.pathname); window.addEventListener("popstate", update); return () => window.removeEventListener("popstate", update); }, []);
+  useEffect(() => {
+    api.me().then((d) => setUser(d.user)).catch(() => setUser(null)).finally(() => setLoaded(true));
+  }, []);
+  const session = useMemo(() => ({ user, loaded, setUser }), [user, loaded]);
   const page = useMemo(() => {
-    if (route === "/") return <HomePage />;
-    if (route === "/duck/DP-0427") return <DuckPage />;
-    if (route === "/my-flock") return <FlockPage />;
-    if (route === "/how-it-works") return <HowPage />;
-    if (route === "/admin") return <AdminPage />;
+    const { name, params } = matchRoute(route);
+    if (name === "home") return <HomePage />;
+    if (name === "duck") return <DuckPage key={params.code} code={params.code} />;
+    if (name === "flock") return <FlockPage />;
+    if (name === "how") return <HowPage />;
+    if (name === "admin") return <AdminPage />;
+    if (name === "login") return <LoginPage />;
     return <NotFound />;
   }, [route]);
-  return <div className="app"><Header route={route} />{page}</div>;
+  return <SessionContext.Provider value={session}><div className="app"><Header route={route} />{page}</div></SessionContext.Provider>;
 }
