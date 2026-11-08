@@ -156,8 +156,10 @@ elif [ ! -f .env ]; then
     printf 'POSTGRES_PASSWORD=%s\n' "$(rand_hex 24)"
     printf 'MINIO_ROOT_PASSWORD=%s\n' "$(rand_hex 24)"
     printf 'SESSION_SECRET=%s\n\n' "$(rand_hex 32)"
-    printf '# The database (postgres/) and photos (minio/) live here.\n'
-    printf 'WADDLE_DATA_DIR=%s/data\n\n' "$DIR"
+    printf '# The database and photos live in these host folders.\n'
+    printf 'WADDLE_DATA_DIR=%s/data\n' "$DIR"
+    printf 'WADDLE_POSTGRES_DIR=%s/data/postgres\n' "$DIR"
+    printf 'WADDLE_MINIO_DIR=%s/data/minio\n\n' "$DIR"
     printf '# The first administrator. Used only when there is no administrator yet;\n'
     printf '# after that it is ignored, and the password here is just a record of what\n'
     printf '# was set.\n'
@@ -171,17 +173,23 @@ fi
 
 DATA_DIR="$(env_value WADDLE_DATA_DIR)"; DATA_DIR="${DATA_DIR:-./data}"
 case "$DATA_DIR" in /*) ;; *) DATA_DIR="$DIR/${DATA_DIR#./}" ;; esac
-mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/minio" || die "Could not make $DATA_DIR. Is $DIR writable?"
+# Installs from before the compose file named each folder kept them under WADDLE_DATA_DIR
+# (or ./data). Name them, or the stack would start on empty named volumes instead.
+if ! grep -q '^WADDLE_POSTGRES_DIR=' .env; then
+  {
+    printf '\n# Host folders for the database and photos (added by install.sh).\n'
+    printf 'WADDLE_POSTGRES_DIR=%s/postgres\n' "$DATA_DIR"
+    printf 'WADDLE_MINIO_DIR=%s/minio\n' "$DATA_DIR"
+  } >> .env
+fi
+PG_DIR="$(env_value WADDLE_POSTGRES_DIR)"
+MINIO_DIR="$(env_value WADDLE_MINIO_DIR)"
+for d in "$PG_DIR" "$MINIO_DIR"; do
+  case "$d" in /*) mkdir -p "$d" || die "Could not make $d. Is it writable?" ;; esac
+done
 
 say "Pulling images"
 docker compose pull db
-
-# The photo store runs as uid 1000 and cannot write to a folder it does not own. Docker can
-# change that without sudo, using the database image that is already here.
-if [ "$(uname -s)" = Linux ] && [ "$(stat -c %u "$DATA_DIR/minio")" != 1000 ]; then
-  docker run --rm --user 0 -v "$DATA_DIR/minio:/d" --entrypoint chown postgres:17-alpine 1000:1000 /d \
-    </dev/null || die "Could not hand $DATA_DIR/minio to the photo store (uid 1000)."
-fi
 
 say "Building and starting"
 echo "The first build compiles the photo store (MinIO) from source, which takes several minutes."
@@ -248,17 +256,18 @@ cat <<SUMMARY
   Public address    $URL
 
   Installed in      $DIR
-  Data in           $DATA_DIR
+  Data in           ${PG_DIR:-named volume} (database)
+                    ${MINIO_DIR:-named volume} (photos)
   Holding           ${HELD:-(could not read the database)}
 
-  Back up $DIR/.env and $DATA_DIR.
+  Back up $DIR/.env and both data folders.
 SUMMARY
 
 if [ "$ADOPTED" = yes ]; then
   cat <<MOVED
 
 The earlier install in $OLD_DIR has been replaced by this one. Its data is
-still used where it is ($DATA_DIR); $OLD_DIR/app, $OLD_DIR/.env and
+still used where it is (under $DATA_DIR); $OLD_DIR/app, $OLD_DIR/.env and
 /etc/waddleaboard/install.conf are no longer needed.
 MOVED
 fi

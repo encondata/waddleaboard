@@ -1,16 +1,17 @@
 // Operator commands, run inside the api container:
 //   node src/cli.js migrate
 //   node src/cli.js seed-demo
-//   node src/cli.js create-admin --username NAME   (password on stdin or WADDLE_ADMIN_PASSWORD)
-//   node src/cli.js create-user --username NAME --role owner
+//   node src/cli.js create-admin --username NAME   (password on stdin, else WADDLE_ADMIN_PASSWORD)
+//   node src/cli.js create-user --username NAME --role owner   (password on stdin)
 //   node src/cli.js has-admin   (exit 0 if an admin account exists, 1 if not)
 import path from "node:path";
 import pg from "pg";
-import { hashPassword } from "./auth.js";
 import { loadConfig } from "./config.js";
 import { runMigrations, runSeed } from "./migrate.js";
 import { createPgStore } from "./store.js";
-import { validateNewUser } from "./validation.js";
+import { ensureUser } from "./users.js";
+
+export { ensureUser };
 
 export function parseArgs(argv) {
   const [command, ...rest] = argv;
@@ -31,15 +32,6 @@ async function readStdin() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   return Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
-}
-
-// Creates a user unless one with that username already exists. Returns a status word.
-export async function ensureUser(store, { username, password, role, displayName }) {
-  const existing = await store.getUserByUsername(username);
-  if (existing) return existing.role === role ? "exists" : "exists-with-other-role";
-  const input = validateNewUser({ username, password, role, displayName });
-  const created = await store.createUser({ ...input, passwordHash: await hashPassword(input.password) });
-  return created ? "created" : "exists";
 }
 
 async function main() {
@@ -70,7 +62,10 @@ async function main() {
     } else if (command === "create-admin" || command === "create-user") {
       const role = command === "create-admin" ? "admin" : String(flags.role || "owner");
       const username = String(flags.username || "");
-      const password = process.env.WADDLE_ADMIN_PASSWORD || (await readStdin());
+      // The api container also has WADDLE_ADMIN_PASSWORD (for the first administrator), so a
+      // password given on stdin always wins, and only create-admin falls back to it.
+      const typed = await readStdin();
+      const password = typed || (role === "admin" ? process.env.WADDLE_ADMIN_PASSWORD || "" : "");
       const status = await ensureUser(createPgStore(pool), { username, password, role });
       if (status === "created") console.log(`created ${role} ${username}`);
       else if (status === "exists") console.log(`${role} ${username} already exists; left unchanged`);

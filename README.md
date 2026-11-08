@@ -26,7 +26,7 @@ It asks where to install (default `~/waddleaboard`, or `/mnt/user/waddleaboard` 
 address people will use, clones the repository, writes `.env` with fresh secrets and an administrator
 account, builds the images and starts the stack. The first build compiles MinIO from source and takes
 several minutes. The database and photos live in `data/postgres` and `data/minio` inside the install
-folder (set `WADDLE_DATA_DIR` in `.env` to move them). Back up `.env` and `data/`.
+folder (`WADDLE_POSTGRES_DIR` and `WADDLE_MINIO_DIR` in `.env` move them). Back up `.env` and `data/`.
 
 Run the same command again to update: it keeps `.env` and the data, and only prints the admin
 password while it still works. `WADDLE_DIR`, `WADDLE_SITE_URL`, `WADDLE_PORT`, `WADDLE_ADMIN_USER`,
@@ -40,6 +40,26 @@ signing in works only through the proxy.
 An install made by the earlier installer (sources copied to `<dir>/app`, recorded in
 `/etc/waddleaboard/install.conf`) is picked up: install into a new folder and its `.env` and data
 folder are carried over.
+
+### Deploy with Slipway
+
+Create the instance with **docker compose** as the build (compose file `docker-compose.yml`), not
+Dockerfile: there is no single Dockerfile, the compose file builds four services. Give it these
+environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `POSTGRES_PASSWORD` | long random string (`openssl rand -hex 24`); keep it, the database is created with it |
+| `MINIO_ROOT_PASSWORD` | long random string (`openssl rand -hex 24`) |
+| `SESSION_SECRET` | 64 random hex characters (`openssl rand -hex 32`) |
+| `WADDLE_ADMIN_USER`, `WADDLE_ADMIN_PASSWORD` | the first administrator, created at startup while there is none |
+| `WEB_PORT` | host port for your reverse proxy (default 8430) |
+| `SITE_URL`, `COOKIE_SECURE` | the public address, and `1` when it is `https://` |
+| `WADDLE_POSTGRES_DIR`, `WADDLE_MINIO_DIR` | optional absolute host folders, e.g. `/mnt/user/appdata/waddleaboard/postgres`; unset, Docker named volumes are used |
+
+Data must not live inside the release folder, which Slipway replaces on every deploy: the
+compose file uses named volumes (or the folders above), never `./data`. Changing
+`POSTGRES_PASSWORD` later does not change the database's own password.
 
 ### Operating the stack
 
@@ -63,7 +83,8 @@ cp .env.example .env             # then set real passwords and a SESSION_SECRET
 docker compose up -d --build
 ```
 
-The site is then at `http://localhost:8430` (or `WEB_PORT`). For hot reload, keep `db` and
+The site is then at `http://localhost:8430` (or `WEB_PORT`), with the database and photos in Docker
+named volumes, and `WADDLE_ADMIN_USER` from `.env` as the administrator. For hot reload, keep `db` and
 `spaces` running in compose and run the api and Vite locally:
 
 ```bash

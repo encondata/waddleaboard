@@ -190,6 +190,9 @@ export function createMemoryStore() {
       const f = db.finds.find((x) => x.id === p.findId);
       return { objectKey: p.objectKey, contentType: p.contentType, sizeBytes: p.sizeBytes, findStatus: f.status };
     },
+    async countUsersByRole(role) {
+      return db.users.filter((u) => u.role === role).length;
+    },
     async getUserByUsername(username) {
       return db.users.find((u) => u.username.toLowerCase() === String(username).toLowerCase()) || null;
     },

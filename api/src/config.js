@@ -28,6 +28,7 @@ export function loadConfig(env = process.env) {
     loginWindowMinutes: int(env.LOGIN_WINDOW_MINUTES, 15),
     runMigrations: bool(env.RUN_MIGRATIONS, true),
     seedDemo: bool(env.SEED_DEMO, false),
+    firstAdmin: { username: (env.WADDLE_ADMIN_USER || "").trim(), password: env.WADDLE_ADMIN_PASSWORD || "" },
     migrationsDir: env.MIGRATIONS_DIR || new URL("../../db/migrations", import.meta.url).pathname,
     seedsDir: env.SEEDS_DIR || new URL("../../db/seeds", import.meta.url).pathname,
     storage: {

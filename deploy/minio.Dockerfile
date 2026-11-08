@@ -14,12 +14,14 @@ RUN go build -trimpath -tags kqueue \
       -o /out/minio .
 
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates \
+RUN apk add --no-cache ca-certificates su-exec \
  && adduser -D -H -u 1000 minio \
  && mkdir /data && chown minio:minio /data
 COPY --from=build /out/minio /usr/local/bin/minio
-USER minio
+# Starts as root only to give /data to the minio user, then runs MinIO as that user.
+COPY minio-entrypoint.sh /usr/local/bin/minio-entrypoint.sh
+RUN chmod 755 /usr/local/bin/minio-entrypoint.sh
 VOLUME /data
 EXPOSE 9000 9001
-ENTRYPOINT ["minio"]
+ENTRYPOINT ["minio-entrypoint.sh"]
 CMD ["server", "/data", "--console-address", ":9001"]

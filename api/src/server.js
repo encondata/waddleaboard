@@ -7,6 +7,7 @@ import { loadConfig } from "./config.js";
 import { runMigrations, runSeed } from "./migrate.js";
 import { createPgStore } from "./store.js";
 import { createMinioStorage } from "./storage.js";
+import { ensureFirstAdmin } from "./users.js";
 
 async function retry(label, fn, { attempts = 30, delayMs = 2000 } = {}) {
   for (let i = 1; ; i++) {
@@ -40,12 +41,23 @@ async function main() {
     }
   }
 
+  const store = createPgStore(pool);
+  try {
+    const result = await ensureFirstAdmin(store, config.firstAdmin);
+    if (result === "created") console.info(`created administrator ${config.firstAdmin.username}`);
+    if (result === "exists-with-other-role") {
+      console.warn(`WADDLE_ADMIN_USER ${config.firstAdmin.username} is an existing account that is not an administrator; no administrator was created`);
+    }
+  } catch (err) {
+    console.warn(`could not create the first administrator from WADDLE_ADMIN_USER: ${err.message}`);
+  }
+
   const storage = createMinioStorage(config.storage);
   await retry("minio", async () => {
     if (await storage.ensureBucket()) console.info(`created bucket ${storage.bucket}`);
   });
 
-  const app = createApp({ store: createPgStore(pool), storage, config });
+  const app = createApp({ store, storage, config });
   const server = http.createServer((req, res) => app.handle(req, res));
   server.requestTimeout = 120_000;
   server.listen(config.port, () => console.info(`waddleaboard api listening on :${config.port}`));

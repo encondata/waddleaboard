@@ -10,9 +10,11 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-waddleaboard}
       POSTGRES_USER: ${POSTGRES_USER:-waddle}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (in .env or the deployer's environment)}
     volumes:
-      - ${WADDLE_DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
+      # A named volume unless WADDLE_POSTGRES_DIR names a host folder (install.sh sets one).
+      # Never a path relative to this file: deployers such as Slipway replace it on each deploy.
+      - ${WADDLE_POSTGRES_DIR:-postgres-data}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -29,9 +31,9 @@ services:
     restart: unless-stopped
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-waddle}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD (in .env or the deployer's environment)}
     volumes:
-      - ${WADDLE_DATA_DIR:-./data}/minio:/data
+      - ${WADDLE_MINIO_DIR:-minio-data}:/data
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9000/minio/health/live"]
       interval: 5s
@@ -61,7 +63,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-waddle}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET:-waddleaboard-photos}
-      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET (in .env or the deployer's environment)}
       SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-168}
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
       PHOTO_MAX_BYTES: ${PHOTO_MAX_BYTES:-8388608}
@@ -69,6 +71,9 @@ services:
       LOGIN_WINDOW_MINUTES: ${LOGIN_WINDOW_MINUTES:-15}
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-1}
       SEED_DEMO: ${SEED_DEMO:-0}
+      # The first administrator, created at startup only while there is none.
+      WADDLE_ADMIN_USER: ${WADDLE_ADMIN_USER:-}
+      WADDLE_ADMIN_PASSWORD: ${WADDLE_ADMIN_PASSWORD:-}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
       interval: 10s
@@ -94,3 +99,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 10
+
+volumes:
+  postgres-data:
+  minio-data:
