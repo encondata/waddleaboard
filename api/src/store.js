@@ -278,15 +278,21 @@ export function createPgStore(pool) {
     async setFindStatus(id, status, moderatorId, now) {
       return tx(async (client) => {
         const { rows } = await client.query(
-          "UPDATE finds SET status = $2, moderated_at = $3, moderated_by = $4 WHERE id = $1 RETURNING duck_id, rehidden",
+          `WITH old_find AS (SELECT status FROM finds WHERE id = $1 FOR UPDATE)
+           UPDATE finds f SET status = $2, moderated_at = $3, moderated_by = $4
+           FROM old_find WHERE f.id = $1 RETURNING f.duck_id, old_find.status AS previous`,
           [id, status, now, moderatorId],
         );
         if (!rows[0]) return null;
-        if (status === "approved") {
+        // The duck's status follows its newest approved find, whatever order finds are
+        // approved or rejected in. Only approvals (made or undone) touch it.
+        if (status === "approved" || rows[0].previous === "approved") {
           await client.query(
-            `UPDATE ducks SET status = CASE WHEN $2::boolean THEN 'Rehidden' ELSE 'Adopted' END
-             WHERE id = $1 AND status <> 'Retired'`,
-            [rows[0].duck_id, rows[0].rehidden],
+            `UPDATE ducks d SET status = CASE WHEN latest.rehidden THEN 'Rehidden' ELSE 'Adopted' END
+             FROM (SELECT rehidden FROM finds WHERE duck_id = $1 AND status = 'approved'
+                   ORDER BY created_at DESC, id DESC LIMIT 1) latest
+             WHERE d.id = $1 AND d.status <> 'Retired'`,
+            [rows[0].duck_id],
           );
         }
         return findById(client, id);

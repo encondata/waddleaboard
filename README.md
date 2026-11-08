@@ -141,6 +141,16 @@ Migration `005_duck_types.sql` backfills existing ducks into types grouped by na
 
 - Photos live in a private MinIO bucket. The API checks each file's magic bytes
   (JPEG/PNG/WebP), enforces `PHOTO_MAX_BYTES` (default 8 MB) and streams photos back itself.
+- Metadata is stripped from every photo before it is stored: EXIF (including GPS position),
+  XMP, IPTC, comments and PNG text chunks. A JPEG keeps only its orientation. A photo whose
+  structure cannot be followed is refused rather than stored with its metadata.
+- Logins are limited per address and username, per address, and per username (5, 20 and 50
+  failures in `LOGIN_WINDOW_MINUTES`, scaled by `LOGIN_MAX_FAILURES`). nginx also rate-limits
+  logins and new finds per address and answers `429` with the usual JSON error.
+- Behind a reverse proxy, nginx takes the client address from `X-Forwarded-For`, but only when
+  the connection comes from a private network (10/8, 172.16/12, 192.168/16, 100.64/10,
+  loopback, fc00::/7), where such a proxy would be. Anyone on the LAN who can reach the port
+  directly can therefore set their own address; from the internet the header is ignored.
 - MinIO no longer publishes container images, so `deploy/minio.Dockerfile` builds the
   pinned upstream release from source. MinIO is AGPL-3.0.
 - No TLS of its own. Put a TLS-terminating proxy in front; `COOKIE_SECURE=1` (set by the installer

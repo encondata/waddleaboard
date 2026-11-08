@@ -126,3 +126,10 @@ test("slugify derives type slugs from names", () => {
   assert.equal(slugify("!"), "duck");
   assert.equal(slugify("x".repeat(60)).length, 36);
 });
+
+test("text fields drop NUL bytes and miles stay inside an integer column", () => {
+  assert.equal(validateFind({ name: "Ma\u0000ya", place: "Coz\u0000umel", note: "Hi" }).finderName, "Maya");
+  assert.throws(() => validateFind({ name: "\u0000", place: "B", note: "C" }), /Your name is required/);
+  assert.equal(validateDuck({ code: "DP-0001", name: "A", color: "B", miles: 2147483647 }).miles, 2147483647);
+  assert.throws(() => validateDuck({ code: "DP-0001", name: "A", color: "B", miles: 2147483648 }), /Miles/);
+});

@@ -5,7 +5,7 @@ import { createApp } from "../src/app.js";
 import { hashPassword } from "../src/auth.js";
 import { loadConfig } from "../src/config.js";
 import { createMemoryStorage, createMemoryStore } from "./fakes.js";
-import { JPEG } from "./images.js";
+import { JPEG, exifSegment, jpegWith } from "./images.js";
 
 const PHOTO_LIMIT = 64 * 1024;
 let server;
@@ -614,5 +614,76 @@ describe("error handling", () => {
     assertJsonError(r, 500);
     assert.equal(r.data.error.message, "Something went wrong on our side.");
     assert.equal(ctx.errors.length, 1, "logged server-side");
+  });
+});
+
+describe("photo privacy", () => {
+  test("location and other metadata are stripped before a photo is stored", async () => {
+    const dirty = jpegWith(exifSegment({ orientation: 6, description: "GPS 25.7617 N 80.1918 W secret" }));
+    const r = await api("/api/ducks/DP-0427/finds", { method: "POST", body: findForm({ name: "A", place: "B", note: "C" }, { bytes: dirty, type: "image/jpeg", name: "a.jpg" }) });
+    assert.equal(r.status, 201, JSON.stringify(r.data));
+    const [, stored] = [...ctx.storage.objects][0];
+    assert.doesNotMatch(stored.buffer.toString("latin1"), /secret|GPS/);
+    const { cookie } = await login("admin", "admin-password");
+    const photo = await api(r.data.find.photoUrl, { cookie });
+    assert.equal(photo.status, 200);
+    assert.doesNotMatch(photo.data.toString("latin1"), /secret|GPS/);
+    assert.ok(photo.data.length < dirty.length);
+    assert.equal(Number(photo.res.headers.get("content-length")), photo.data.length);
+  });
+
+  test("a photo whose structure cannot be read is refused", async () => {
+    const fake = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]), Buffer.from("JFIF\0fake-jpeg-body"), Buffer.from([0xff, 0xd9])]);
+    const r = await api("/api/ducks/DP-0427/finds", { method: "POST", body: findForm({ name: "A", place: "B", note: "C" }, { bytes: fake, type: "image/jpeg", name: "a.jpg" }) });
+    assertJsonError(r, 400);
+    assert.equal(r.data.error.code, "invalid_photo");
+    assert.equal(ctx.store.db.finds.length, 0);
+    assert.equal(ctx.storage.objects.size, 0);
+  });
+});
+
+describe("login throttling", () => {
+  const attempt = (username, password, ip) =>
+    api("/api/auth/login", { method: "POST", json: { username, password }, headers: ip ? { "x-real-ip": ip } : {} });
+
+  test("parallel guesses cannot get more tries than the limit", async () => {
+    const results = await Promise.all(Array.from({ length: 12 }, () => attempt("admin", "wrong-password")));
+    const statuses = results.map((r) => r.status);
+    assert.equal(statuses.filter((s) => s === 401).length, 3, statuses.join(","));
+    assert.equal(statuses.filter((s) => s === 429).length, 9);
+  });
+
+  test("one address guessing many usernames is stopped", async () => {
+    for (let i = 0; i < 12; i++) assertJsonError(await attempt(`user${i}`, "wrong-password", "203.0.113.7"), 401);
+    assertJsonError(await attempt("pat", "owner-password", "203.0.113.7"), 429);
+    assert.equal((await attempt("pat", "owner-password", "203.0.113.8")).status, 200, "other addresses are unaffected");
+  });
+
+  test("one username guessed from many addresses is stopped", async () => {
+    for (let i = 0; i < 30; i++) assertJsonError(await attempt("admin", "wrong-password", `198.51.100.${Math.floor(i / 3)}`), 401);
+    assertJsonError(await attempt("admin", "admin-password", "198.51.100.200"), 429);
+    assert.equal((await attempt("pat", "owner-password", "198.51.100.200")).status, 200);
+  });
+
+  test("successful logins do not count towards the limits", async () => {
+    for (let i = 0; i < 15; i++) assert.equal((await attempt("pat", "owner-password")).status, 200);
+  });
+
+  test("a username with a NUL byte is a 400, not a database error", async () => {
+    assertJsonError(await attempt("ad\u0000min", "whatever1"), 400);
+  });
+});
+
+describe("duck status follows the newest approved find", () => {
+  test("approval order and later rejections do not leave a stale status", async () => {
+    const older = await ctx.store.createFind({ duckId: 1, finderName: "A", place: "Nassau", note: "1", rehidden: false });
+    const newer = await ctx.store.createFind({ duckId: 1, finderName: "B", place: "Cozumel", note: "2", rehidden: true });
+    const { cookie } = await login("admin", "admin-password");
+    const status = async () => (await ctx.store.findDuckByCode("DP-0427")).status;
+    await api(`/api/admin/finds/${newer.id}/approve`, { method: "POST", cookie });
+    await api(`/api/admin/finds/${older.id}/approve`, { method: "POST", cookie });
+    assert.equal(await status(), "Rehidden", "the newer find decides, not the last approval");
+    await api(`/api/admin/finds/${newer.id}/reject`, { method: "POST", cookie });
+    assert.equal(await status(), "Adopted", "rejecting it falls back to the older find");
   });
 });

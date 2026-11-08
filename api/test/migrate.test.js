@@ -68,3 +68,17 @@ test("migration 005 adds duck types, backfills ducks and then requires type_id",
   assert.match(sql, /CREATE INDEX ducks_type_id_idx ON ducks \(type_id\)/);
   assert.doesNotMatch(sql, /CONCURRENTLY/, "runs inside the migrator transaction");
 });
+
+test("the advisory lock is taken before anything else touches the database", async () => {
+  const dir = await tempMigrations({ "001_a.sql": "CREATE TABLE a ();" });
+  const client = createFakeMigrationClient();
+  const seen = [];
+  const query = client.query.bind(client);
+  client.query = (sql, params) => {
+    seen.push(sql.trim().split(/\s+/).slice(0, 2).join(" "));
+    return query(sql, params);
+  };
+  await runMigrations(client, dir, quiet);
+  assert.equal(seen[0], "SELECT pg_advisory_lock($1)");
+  assert.equal(seen.at(-1), "SELECT pg_advisory_unlock($1)");
+});

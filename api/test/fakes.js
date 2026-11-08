@@ -173,9 +173,15 @@ export function createMemoryStore() {
     async setFindStatus(id, status, moderatorId, now) {
       const f = db.finds.find((x) => x.id === id);
       if (!f) return null;
+      const previous = f.status;
       Object.assign(f, { status, moderatedAt: now.toISOString(), moderatedBy: moderatorId });
       const duck = db.ducks.find((d) => d.id === f.duckId);
-      if (status === "approved" && duck.status !== "Retired") duck.status = f.rehidden ? "Rehidden" : "Adopted";
+      if ((status === "approved" || previous === "approved") && duck.status !== "Retired") {
+        const latest = db.finds
+          .filter((x) => x.duckId === f.duckId && x.status === "approved")
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id - a.id)[0];
+        if (latest) duck.status = latest.rehidden ? "Rehidden" : "Adopted";
+      }
       return findView(f);
     },
     async getPhoto(id) {

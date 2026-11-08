@@ -13,12 +13,13 @@ export async function listMigrations(dir) {
 // `client` must be a single connection (not a pool) so the lock and transactions hold.
 export async function runMigrations(client, dir, { logger = console } = {}) {
   const migrations = await listMigrations(dir);
-  await client.query(
-    "CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())",
-  );
+  // Lock first: two runners creating schema_migrations at once would collide.
   await client.query("SELECT pg_advisory_lock($1)", [LOCK_ID]);
   const applied = [];
   try {
+    await client.query(
+      "CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())",
+    );
     const { rows } = await client.query("SELECT name FROM schema_migrations");
     const done = new Set(rows.map((r) => r.name));
     for (const migration of migrations) {

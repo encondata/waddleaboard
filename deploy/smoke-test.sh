@@ -101,8 +101,11 @@ expect 200 "owner my-flock"
 if grep -q "\"$CODE\"" "$WORK/body"; then ok "owner sees $CODE in their flock"; else bad "flock: $(body)"; fi
 
 # Finds + photos
-printf '\xff\xd8\xff\xe0\x00\x10JFIF\x00smoke-test-jpeg\xff\xd9' >"$WORK/duck.jpg"
-req POST "/api/ducks/$CODE/finds" -F name="Smoke Tester" -F place="Nassau, Bahamas" -F note="Hello from the smoke test" -F rehidden=yes -F "photo=@$WORK/duck.jpg;type=image/jpeg"
+# A real 2x1 JPEG, and the same with a comment segment (FF FE) after JFIF standing in for the
+# metadata a phone adds. The API must store the photo without it.
+printf '%s' '/9j/4AAQSkZJRgABAQAASABIAAD/wAARCAABAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9sAQwAEBAQEBAQGBAQGCQYGBgkMCQkJCQwPDAwMDAwPEg8PDw8PDxISEhISEhISFRUVFRUVGRkZGRkcHBwcHBwcHBwc/9sAQwEEBQUHBwcMBwcMHRQQFB0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0d/90ABAAB/9oADAMBAAIRAxEAPwD7s0b/AJA9j/17xf8AoArSrN0b/kD2P/XvF/6AK0q/Lz6o/9k=' | base64 -d >"$WORK/duck.jpg"
+{ head -c 20 "$WORK/duck.jpg"; printf '\xff\xfe\x00\x0esmoke-secret'; tail -c +21 "$WORK/duck.jpg"; } >"$WORK/duck-with-metadata.jpg"
+req POST "/api/ducks/$CODE/finds" -F name="Smoke Tester" -F place="Nassau, Bahamas" -F note="Hello from the smoke test" -F rehidden=yes -F "photo=@$WORK/duck-with-metadata.jpg;type=image/jpeg"
 expect 201 "submit find with JPEG"
 FIND_ID="$(json_num id)"
 PHOTO_URL="$(json_field photoUrl)"
@@ -117,7 +120,7 @@ req GET "/api/ducks/$CODE/finds"
 if grep -q "\"id\":$FIND_ID," "$WORK/body"; then ok "approved find is public"; else bad "approved find missing: $(body)"; fi
 req GET "$PHOTO_URL"
 if [[ "$STATUS" == 200 ]] && grep -qi 'content-type: image/jpeg' "$WORK/headers" && cmp -s "$WORK/body" "$WORK/duck.jpg"; then
-  ok "photo URL loads the uploaded bytes"
+  ok "photo URL loads the uploaded image, without its metadata"
 else
   bad "photo: $STATUS"
 fi

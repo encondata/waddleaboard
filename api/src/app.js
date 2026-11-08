@@ -1,5 +1,6 @@
 // Request handling for the Waddle Aboard API. Dependencies are injected so tests can use fakes.
 import { randomUUID } from "node:crypto";
+import { pipeline } from "node:stream";
 import {
   HttpError,
   badRequest,
@@ -15,11 +16,13 @@ import {
   serializeCookie,
   unauthorized,
 } from "./http.js";
+import { stripPhotoMetadata } from "./photo-metadata.js";
 import { createRouter } from "./router.js";
 import {
   LoginThrottle,
   SESSION_COOKIE,
   burnPasswordCheck,
+  loginKeys,
   hashPassword,
   newSessionToken,
   sessionTokenHash,
@@ -270,10 +273,12 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
     if (photoFile) {
       const buffer = Buffer.from(await photoFile.arrayBuffer());
       const meta = validatePhoto(buffer, config.photoMaxBytes);
+      // Approved photos are public, so where and when they were taken must not travel with them.
+      const clean = stripPhotoMetadata(buffer, meta.contentType);
       const id = randomUUID();
       const objectKey = `finds/${duck.code}/${id}.${meta.ext}`;
-      await storage.putObject(objectKey, buffer, meta.contentType);
-      photo = { id, objectKey, contentType: meta.contentType, sizeBytes: meta.size };
+      await storage.putObject(objectKey, clean, meta.contentType);
+      photo = { id, objectKey, contentType: meta.contentType, sizeBytes: clean.length };
     }
 
     let find;
@@ -301,7 +306,8 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
     res.writeHead(200, {
       "Content-Type": photo.contentType,
       ...(photo.sizeBytes ? { "Content-Length": photo.sizeBytes } : {}),
-      "Cache-Control": photo.findStatus === "approved" ? "public, max-age=86400" : "private, no-store",
+      // An hour, so a photo that is rejected after approval does not linger in caches for long.
+      "Cache-Control": photo.findStatus === "approved" ? "public, max-age=3600" : "private, no-store",
       "X-Content-Type-Options": "nosniff",
     });
     if (req.method === "HEAD") {
@@ -309,8 +315,8 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
       res.end();
       return;
     }
-    object.on("error", () => res.destroy());
-    object.pipe(res);
+    // pipeline closes the storage stream too when the client goes away mid-download.
+    pipeline(object, res, () => {});
   });
 
   // --- auth ---
@@ -320,22 +326,29 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
     const password = typeof body.password === "string" ? body.password : "";
     if (!username || !password) throw badRequest("Enter your username and password.", "validation_failed");
 
-    const key = `${clientIp(req)}|${username.toLowerCase()}`;
-    const retry = throttle.retryAfter(key);
+    if (username.includes("\0") || username.length > 200) {
+      throw badRequest("Enter your username and password.", "validation_failed");
+    }
+
+    const keys = loginKeys(clientIp(req), username, config.loginMaxFailures);
+    const retry = Math.max(...keys.map(({ key, limit }) => throttle.retryAfter(key, limit)));
     if (retry) {
       throw new HttpError(429, "too_many_attempts", "Too many failed logins. Please wait and try again.", {
         headers: { "Retry-After": String(retry) },
       });
     }
+    // Counted before the password check, not after it, so parallel guesses cannot all slip
+    // past the limit while their checks are running. A success takes the attempt back.
+    const stamps = keys.map(({ key }) => throttle.fail(key));
 
     const user = await store.getUserByUsername(username);
     const ok = user ? await verifyPassword(password, user.passwordHash) : await burnPasswordCheck(password).then(() => false);
     if (!ok) {
-      throttle.fail(key);
       await wait(failureDelayMs);
       throw new HttpError(401, "invalid_credentials", "That username and password do not match.");
     }
-    throttle.reset(key);
+    keys.forEach(({ key }, n) => throttle.forget(key, stamps[n]));
+    throttle.reset(keys[0].key);
 
     const token = newSessionToken();
     const maxAge = config.sessionTtlHours * 3600;
@@ -387,7 +400,7 @@ export function createApp({ store, storage, config, now = () => Date.now(), slee
   const moderate = (status) => async (req, res, { params }) => {
     const admin = await requireAdmin(req);
     const id = Number(params.id);
-    if (!Number.isInteger(id) || id <= 0) throw notFound("Find not found.");
+    if (!Number.isSafeInteger(id) || id <= 0) throw notFound("Find not found.");
     const find = await store.setFindStatus(id, status, admin.id, new Date(now()));
     if (!find) throw notFound("Find not found.");
     sendJson(res, 200, { find: adminFind(find) });

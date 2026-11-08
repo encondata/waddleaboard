@@ -29,7 +29,8 @@ function text(fields, key, label, { required = false, max = 200 } = {}) {
   if (value !== undefined && value !== null && typeof value !== "string") {
     throw badRequest(`${label} must be text.`, "validation_failed");
   }
-  const trimmed = (value ?? "").trim();
+  // Postgres text cannot hold NUL, so it is dropped rather than left to fail the insert.
+  const trimmed = (value ?? "").replace(/\u0000/g, "").trim();
   if (required && !trimmed) throw badRequest(`${label} is required.`, "validation_failed");
   if (trimmed.length > max) throw badRequest(`${label} must be ${max} characters or fewer.`, "validation_failed");
   return trimmed;
@@ -104,7 +105,9 @@ export function validateDuck(fields) {
   let miles = 0;
   if (fields.miles !== undefined && fields.miles !== "") {
     miles = Number(fields.miles);
-    if (!Number.isInteger(miles) || miles < 0) throw badRequest("Miles must be a whole number.", "validation_failed");
+    if (!Number.isInteger(miles) || miles < 0 || miles > 2147483647) {
+      throw badRequest("Miles must be a whole number.", "validation_failed");
+    }
   }
   return {
     code,
