@@ -188,12 +188,15 @@ for d in "$PG_DIR" "$MINIO_DIR"; do
   case "$d" in /*) mkdir -p "$d" || die "Could not make $d. Is it writable?" ;; esac
 done
 
-say "Pulling images"
-docker compose pull db
-
-say "Building and starting"
+say "Building"
 echo "The first build compiles the photo store (MinIO) from source, which takes several minutes."
-UP_ARGS=(-d --build --remove-orphans)
+# --pull fetches newer base images (PostgreSQL, Node, nginx), so an update also picks up their fixes.
+if ! docker compose build --pull; then
+  die "Waddle Aboard could not be built; the reason is above."
+fi
+
+say "Starting"
+UP_ARGS=(-d --remove-orphans)
 # The earlier install's containers have the same names; replace them rather than keep them.
 [ "$ADOPTED" = yes ] && UP_ARGS+=(--force-recreate)
 if ! docker compose up "${UP_ARGS[@]}"; then

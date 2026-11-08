@@ -1,17 +1,27 @@
 # Waddle Aboard stack. install.sh writes .env next to this file and runs it; by hand:
 #   docker compose up -d --build
-# Relative paths below resolve against the repository root.
+# No setting is required: passwords and secrets left unset are generated on first start and
+# kept in the secrets volume (see deploy/db-entrypoint.sh). Relative paths below resolve
+# against the repository root.
 name: waddleaboard
 
 services:
   db:
-    image: postgres:17-alpine
+    build:
+      context: deploy
+      dockerfile: db.Dockerfile
+    image: waddleaboard-db:17
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-waddleaboard}
       POSTGRES_USER: ${POSTGRES_USER:-waddle}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (in .env or the deployer's environment)}
+      # Given values win; any left empty are generated once and kept in the secrets volume.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      WADDLE_ADMIN_PASSWORD: ${WADDLE_ADMIN_PASSWORD:-}
     volumes:
+      - ${WADDLE_SECRETS_DIR:-secrets}:/run/waddle
       # A named volume unless WADDLE_POSTGRES_DIR names a host folder (install.sh sets one).
       # Never a path relative to this file: deployers such as Slipway replace it on each deploy.
       - ${WADDLE_POSTGRES_DIR:-postgres-data}:/var/lib/postgresql/data
@@ -29,11 +39,15 @@ services:
         MINIO_RELEASE: ${MINIO_RELEASE:-RELEASE.2025-10-15T17-29-55Z}
     image: waddleaboard-spaces:${MINIO_RELEASE:-RELEASE.2025-10-15T17-29-55Z}
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy # it has prepared the secrets by then
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-waddle}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD (in .env or the deployer's environment)}
+      MINIO_ROOT_PASSWORD_FILE: /run/waddle/minio_root_password
     volumes:
       - ${WADDLE_MINIO_DIR:-minio-data}:/data
+      - ${WADDLE_SECRETS_DIR:-secrets}:/run/waddle:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9000/minio/health/live"]
       interval: 5s
@@ -57,13 +71,13 @@ services:
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-waddleaboard}
       POSTGRES_USER: ${POSTGRES_USER:-waddle}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD_FILE: /run/waddle/postgres_password
       MINIO_ENDPOINT: spaces
       MINIO_PORT: 9000
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-waddle}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_PASSWORD_FILE: /run/waddle/minio_root_password
       MINIO_BUCKET: ${MINIO_BUCKET:-waddleaboard-photos}
-      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET (in .env or the deployer's environment)}
+      SESSION_SECRET_FILE: /run/waddle/session_secret
       SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-168}
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
       PHOTO_MAX_BYTES: ${PHOTO_MAX_BYTES:-8388608}
@@ -71,9 +85,12 @@ services:
       LOGIN_WINDOW_MINUTES: ${LOGIN_WINDOW_MINUTES:-15}
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-1}
       SEED_DEMO: ${SEED_DEMO:-0}
-      # The first administrator, created at startup only while there is none.
-      WADDLE_ADMIN_USER: ${WADDLE_ADMIN_USER:-}
-      WADDLE_ADMIN_PASSWORD: ${WADDLE_ADMIN_PASSWORD:-}
+      # The first administrator, created at startup only while there is none. Without
+      # WADDLE_ADMIN_PASSWORD its password is generated and printed once in this log.
+      WADDLE_ADMIN_USER: ${WADDLE_ADMIN_USER:-admin}
+      WADDLE_ADMIN_PASSWORD_FILE: /run/waddle/admin_password
+    volumes:
+      - ${WADDLE_SECRETS_DIR:-secrets}:/run/waddle:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
       interval: 10s
@@ -103,3 +120,4 @@ services:
 volumes:
   postgres-data:
   minio-data:
+  secrets:

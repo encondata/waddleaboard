@@ -42,6 +42,7 @@ test("the first administrator comes from WADDLE_ADMIN_USER and WADDLE_ADMIN_PASS
   assert.deepEqual(loadConfig({ WADDLE_ADMIN_USER: " captain ", WADDLE_ADMIN_PASSWORD: "seaworthy1" }).firstAdmin, {
     username: "captain",
     password: "seaworthy1",
+    generated: false,
   });
-  assert.deepEqual(loadConfig({}).firstAdmin, { username: "", password: "" });
+  assert.deepEqual(loadConfig({}).firstAdmin, { username: "", password: "", generated: false });
 });

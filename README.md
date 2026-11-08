@@ -44,22 +44,31 @@ folder are carried over.
 ### Deploy with Slipway
 
 Create the instance with **docker compose** as the build (compose file `docker-compose.yml`), not
-Dockerfile: there is no single Dockerfile, the compose file builds four services. Give it these
-environment variables:
+Dockerfile: there is no single Dockerfile, the compose file builds four services. No environment
+variables are needed. On the first start the database container generates the database, MinIO
+and session passwords and keeps them in the `secrets` volume, and the api creates the
+administrator `admin` and prints its generated password once in its log:
+
+```
+created administrator admin with the generated password 3f9c… (also in /run/waddle/admin_password …)
+```
+
+Optional variables, all read on every deploy:
 
 | Variable | Value |
 | --- | --- |
-| `POSTGRES_PASSWORD` | long random string (`openssl rand -hex 24`); keep it, the database is created with it |
-| `MINIO_ROOT_PASSWORD` | long random string (`openssl rand -hex 24`) |
-| `SESSION_SECRET` | 64 random hex characters (`openssl rand -hex 32`) |
-| `WADDLE_ADMIN_USER`, `WADDLE_ADMIN_PASSWORD` | the first administrator, created at startup while there is none |
+| `WADDLE_ADMIN_USER`, `WADDLE_ADMIN_PASSWORD` | choose the first administrator instead (used only while there is none) |
 | `WEB_PORT` | host port for your reverse proxy (default 8430) |
 | `SITE_URL`, `COOKIE_SECURE` | the public address, and `1` when it is `https://` |
-| `WADDLE_POSTGRES_DIR`, `WADDLE_MINIO_DIR` | optional absolute host folders, e.g. `/mnt/user/appdata/waddleaboard/postgres`; unset, Docker named volumes are used |
+| `WADDLE_POSTGRES_DIR`, `WADDLE_MINIO_DIR`, `WADDLE_SECRETS_DIR` | absolute host folders, e.g. `/mnt/user/appdata/waddleaboard/postgres`, instead of named volumes |
+| `POSTGRES_PASSWORD`, `MINIO_ROOT_PASSWORD`, `SESSION_SECRET` | your own secrets instead of generated ones; set the database password before the first deploy or never |
 
 Data must not live inside the release folder, which Slipway replaces on every deploy: the
-compose file uses named volumes (or the folders above), never `./data`. Changing
-`POSTGRES_PASSWORD` later does not change the database's own password.
+compose file uses named volumes (or the folders above), never `./data`. Back up the secrets
+volume together with the database: the database keeps the password it was created with. If the
+secrets are lost, reset it from inside the database container (local connections need no
+password): `docker compose exec db psql -U waddle -d waddleaboard -c "ALTER USER waddle PASSWORD '…'"`,
+then set `POSTGRES_PASSWORD` to the same value.
 
 ### Operating the stack
 
@@ -79,12 +88,12 @@ Requires Node 22 and npm 11.
 
 ```bash
 npm install                      # installs the api and web workspaces
-cp .env.example .env             # then set real passwords and a SESSION_SECRET
-docker compose up -d --build
+docker compose up -d --build     # no .env needed; see .env.example for the settings
+docker compose logs api | grep 'created administrator'
 ```
 
 The site is then at `http://localhost:8430` (or `WEB_PORT`), with the database and photos in Docker
-named volumes, and `WADDLE_ADMIN_USER` from `.env` as the administrator. For hot reload, keep `db` and
+named volumes and the administrator `admin`, whose generated password the last command shows. For hot reload, keep `db` and
 `spaces` running in compose and run the api and Vite locally:
 
 ```bash

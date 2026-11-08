@@ -44,7 +44,14 @@ async function main() {
   const store = createPgStore(pool);
   try {
     const result = await ensureFirstAdmin(store, config.firstAdmin);
-    if (result === "created") console.info(`created administrator ${config.firstAdmin.username}`);
+    if (result === "created" && config.firstAdmin.generated) {
+      console.info(
+        `created administrator ${config.firstAdmin.username} with the generated password ${config.firstAdmin.password} ` +
+          "(also in /run/waddle/admin_password in this container; set WADDLE_ADMIN_PASSWORD to choose your own)",
+      );
+    } else if (result === "created") {
+      console.info(`created administrator ${config.firstAdmin.username}`);
+    }
     if (result === "exists-with-other-role") {
       console.warn(`WADDLE_ADMIN_USER ${config.firstAdmin.username} is an existing account that is not an administrator; no administrator was created`);
     }
