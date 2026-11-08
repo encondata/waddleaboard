@@ -1,404 +1,304 @@
 #!/usr/bin/env bash
-# Waddle Aboard installer: takes a Linux host with nothing but bash to a running site.
+# Waddle Aboard server installer.
 #
-#   sudo ./install.sh
+#   curl -fsSL https://raw.githubusercontent.com/encondata/waddleaboard/main/install.sh | bash
 #
-# Non-interactive (for testing / automation):
-#   WADDLE_YES=1 WADDLE_INSTALL_DIR=/srv/waddle WADDLE_ADMIN_USER=admin \
-#     WADDLE_ADMIN_PASSWORD='...' ./install.sh
+# Clones or updates the repository, writes .env with fresh secrets and an administrator
+# account on first run, builds the images and brings the stack up. Safe to run again: it
+# never overwrites an existing .env, and it never invents a second administrator.
 #
-# Optional env: WADDLE_WEB_PORT (default 80, first install only), WADDLE_SEED_DEMO=1 (first install only),
-# WADDLE_CONF_FILE (default /etc/waddleaboard/install.conf; records the chosen install dir).
-#
-# Safe to re-run: it reuses the recorded install dir, never overwrites .env, and never creates a
-# second admin.
+# Waddle Aboard serves plain HTTP on port 8430 and expects a reverse proxy in front of it for TLS.
 set -euo pipefail
 
-DEFAULT_INSTALL_DIR="/mntuser/waddleaboard"
-CONF_FILE="${WADDLE_CONF_FILE:-/etc/waddleaboard/install.conf}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-YES="${WADDLE_YES:-0}"
-PROJECT="waddleaboard"
-
-SUDO=()
-DOCKER=(docker)
-INSTALL_DIR=""
-APP_DIR=""
-ENV_FILE=""
-ADMIN_USER=""
-ADMIN_PASSWORD=""
-
-log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
-die() {
-  printf '\033[1;31merror:\033[0m %s\n' "$*" >&2
-  exit 1
-}
-
-interactive() { [[ "$YES" != "1" && -t 0 ]]; }
-
-# --- privileges ------------------------------------------------------------
-
-setup_privileges() {
-  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-    SUDO=()
-  elif command -v sudo >/dev/null 2>&1; then
-    SUDO=(sudo)
-  else
-    SUDO=()
-  fi
-}
-
-as_root() {
-  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-    "$@"
-  elif [[ ${#SUDO[@]} -gt 0 ]]; then
-    "${SUDO[@]}" "$@"
-  else
-    die "This step needs root: re-run as root or install sudo. (Command: $*)"
-  fi
-}
-
-# --- docker ----------------------------------------------------------------
-
-os_family() {
-  [[ -r /etc/os-release ]] || {
-    echo unknown
-    return
-  }
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  local ids=" ${ID:-} ${ID_LIKE:-} "
-  case "$ids" in
-    *" ubuntu "*) echo ubuntu ;;
-    *" debian "*) echo debian ;;
-    *" fedora "*) [[ "${ID:-}" == fedora ]] && echo fedora || echo rhel ;;
-    *" rhel "* | *" centos "*) echo rhel ;;
-    *) echo unknown ;;
-  esac
-}
-
-install_docker_debian() {
-  local distro="$1"
-  log "Installing Docker Engine and the Compose plugin from download.docker.com ($distro)"
-  local codename
-  # shellcheck disable=SC1091
-  codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
-  [[ -n "$codename" ]] || die "Could not determine the $distro release codename from /etc/os-release."
-  as_root apt-get update -y
-  as_root apt-get install -y ca-certificates curl
-  as_root install -m 0755 -d /etc/apt/keyrings
-  as_root curl -fsSL "https://download.docker.com/linux/${distro}/gpg" -o /etc/apt/keyrings/docker.asc
-  as_root chmod a+r /etc/apt/keyrings/docker.asc
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${distro} ${codename} stable" |
-    as_root tee /etc/apt/sources.list.d/docker.list >/dev/null
-  as_root apt-get update -y
-  as_root apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-}
-
-install_docker_rhel() {
-  local repo="$1"
-  log "Installing Docker Engine and the Compose plugin from download.docker.com ($repo)"
-  if command -v dnf >/dev/null 2>&1; then
-    as_root dnf -y install dnf-plugins-core
-    if dnf config-manager --help 2>/dev/null | grep -q -- '--add-repo'; then
-      as_root dnf config-manager --add-repo "https://download.docker.com/linux/${repo}/docker-ce.repo"
-    else
-      as_root dnf config-manager addrepo --from-repofile="https://download.docker.com/linux/${repo}/docker-ce.repo"
-    fi
-    as_root dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  elif command -v yum >/dev/null 2>&1; then
-    as_root yum install -y yum-utils
-    as_root yum-config-manager --add-repo "https://download.docker.com/linux/${repo}/docker-ce.repo"
-    as_root yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  else
-    die "Neither dnf nor yum is available; install Docker manually and re-run."
-  fi
-}
-
-ensure_docker() {
-  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    log "Docker $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo '(daemon not reachable yet)') with $(docker compose version --short 2>/dev/null | sed 's/^/Compose /')"
-  else
-    if [[ "$(uname -s)" != "Linux" ]]; then
-      die "Docker with the Compose v2 plugin is required. On $(uname -s), install Docker Desktop and re-run."
-    fi
-    local family
-    family="$(os_family)"
-    case "$family" in
-      ubuntu | debian) install_docker_debian "$family" ;;
-      rhel) install_docker_rhel centos ;;
-      fedora) install_docker_rhel fedora ;;
-      *) die "Unsupported OS for automatic Docker install. Supported: Debian/Ubuntu and RHEL-family (RHEL, CentOS, Rocky, Alma, Fedora). Install Docker Engine + Compose v2 yourself, then re-run." ;;
-    esac
-    if command -v systemctl >/dev/null 2>&1; then
-      as_root systemctl enable --now docker
-    fi
-    docker compose version >/dev/null 2>&1 || die "Docker installed but 'docker compose' is still unavailable."
-  fi
-
-  if docker info >/dev/null 2>&1; then
-    DOCKER=(docker)
-  elif [[ ${#SUDO[@]} -gt 0 ]] && "${SUDO[@]}" docker info >/dev/null 2>&1; then
-    DOCKER=("${SUDO[@]}" docker)
-  else
-    if command -v systemctl >/dev/null 2>&1; then as_root systemctl start docker || true; fi
-    if docker info >/dev/null 2>&1; then
-      DOCKER=(docker)
-    elif [[ ${#SUDO[@]} -gt 0 ]] && "${SUDO[@]}" docker info >/dev/null 2>&1; then
-      DOCKER=("${SUDO[@]}" docker)
-    else
-      die "Cannot reach the Docker daemon. Is it running, and are you root or in the docker group?"
-    fi
-  fi
-}
-
-# --- install dir -----------------------------------------------------------
-
-read_conf_dir() {
-  [[ -r "$CONF_FILE" ]] || return 1
-  local line
-  line="$(grep -E '^INSTALL_DIR=' "$CONF_FILE" | tail -n 1)" || return 1
-  line="${line#INSTALL_DIR=}"
-  line="${line%\"}"
-  line="${line#\"}"
-  [[ -n "$line" ]] || return 1
-  printf '%s' "$line"
-}
-
-record_conf_dir() {
-  local dir="$1" tmp
-  tmp="$(mktemp)"
-  printf '# Written by Waddle Aboard install.sh\nINSTALL_DIR="%s"\n' "$dir" >"$tmp"
-  if mkdir -p "$(dirname "$CONF_FILE")" 2>/dev/null && cp "$tmp" "$CONF_FILE" 2>/dev/null; then
-    :
-  else
-    as_root mkdir -p "$(dirname "$CONF_FILE")"
-    as_root cp "$tmp" "$CONF_FILE"
-  fi
-  rm -f "$tmp"
-  log "Recorded install dir in $CONF_FILE"
-}
-
-resolve_install_dir() {
-  local recorded=""
-  recorded="$(read_conf_dir || true)"
-  if [[ -n "${WADDLE_INSTALL_DIR:-}" ]]; then
-    INSTALL_DIR="$WADDLE_INSTALL_DIR"
-    if [[ -n "$recorded" && "$recorded" != "$INSTALL_DIR" ]]; then
-      warn "WADDLE_INSTALL_DIR ($INSTALL_DIR) differs from the recorded install dir ($recorded); using $INSTALL_DIR."
-    fi
-  elif [[ -n "$recorded" ]]; then
-    INSTALL_DIR="$recorded"
-    log "Using recorded install dir $INSTALL_DIR"
-  elif interactive; then
-    local answer
-    read -r -p "Install directory [$DEFAULT_INSTALL_DIR]: " answer
-    INSTALL_DIR="${answer:-$DEFAULT_INSTALL_DIR}"
-  else
-    INSTALL_DIR="$DEFAULT_INSTALL_DIR"
-  fi
-  [[ "$INSTALL_DIR" == /* ]] || die "Install directory must be an absolute path (got '$INSTALL_DIR')."
-  INSTALL_DIR="${INSTALL_DIR%/}"
-  APP_DIR="$INSTALL_DIR/app"
-  ENV_FILE="$INSTALL_DIR/.env"
-
-  if [[ ! -d "$INSTALL_DIR" ]]; then
-    mkdir -p "$INSTALL_DIR" 2>/dev/null || {
-      as_root mkdir -p "$INSTALL_DIR"
-      as_root chown "$(id -u):$(id -g)" "$INSTALL_DIR"
-    }
-  fi
-  [[ -w "$INSTALL_DIR" ]] || die "$INSTALL_DIR is not writable; re-run with sudo."
-  if [[ "$recorded" != "$INSTALL_DIR" ]]; then record_conf_dir "$INSTALL_DIR"; fi
-}
-
-# --- sources ---------------------------------------------------------------
-
-sync_sources() {
-  [[ -f "$SCRIPT_DIR/deploy/docker-compose.yml" ]] || die "Run install.sh from a Waddle Aboard checkout (deploy/docker-compose.yml not found next to it)."
-  if [[ "$SCRIPT_DIR" == "$APP_DIR" ]]; then
-    log "Running from the installed copy; sources already in place"
-    return
-  fi
-  log "Copying app sources to $APP_DIR"
-  mkdir -p "$APP_DIR"
-  rm -rf "${APP_DIR:?}/api" "${APP_DIR:?}/web" "${APP_DIR:?}/db" "${APP_DIR:?}/deploy"
-  local items=(api web db deploy package.json package-lock.json .npmrc .dockerignore .env.example install.sh README.md)
-  local present=()
-  local item
-  for item in "${items[@]}"; do
-    [[ -e "$SCRIPT_DIR/$item" ]] && present+=("$item")
-  done
-  tar -C "$SCRIPT_DIR" --exclude=node_modules --exclude=dist --exclude=.DS_Store -cf - "${present[@]}" | tar -C "$APP_DIR" -xf -
-}
-
-# --- secrets & .env --------------------------------------------------------
-
-random_hex() {
-  local bytes="$1"
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex "$bytes"
-  else
-    od -An -N "$bytes" -tx1 /dev/urandom | tr -d ' \n'
-  fi
-}
-
-write_env() {
-  if [[ -e "$ENV_FILE" ]]; then
-    log "Keeping existing $ENV_FILE (never overwritten)"
-    return 1
-  fi
-  local port="${WADDLE_WEB_PORT:-80}"
-  [[ "$port" =~ ^[0-9]+$ ]] || die "WADDLE_WEB_PORT must be a number."
-  local host_url="http://localhost"
-  [[ "$port" == "80" ]] || host_url="http://localhost:$port"
-  log "Writing $ENV_FILE with generated secrets"
-  (
-    umask 077
-    cat >"$ENV_FILE" <<EOF
-# Generated by Waddle Aboard install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ). Keep this file private.
-WEB_PORT=$port
-WEB_BIND=0.0.0.0
-WEB_MAX_BODY_SIZE=12m
-SITE_URL=$host_url
-POSTGRES_DB=waddleaboard
-POSTGRES_USER=waddle
-POSTGRES_PASSWORD=$(random_hex 24)
-MINIO_ROOT_USER=waddle
-MINIO_ROOT_PASSWORD=$(random_hex 24)
-MINIO_BUCKET=waddleaboard-photos
-MINIO_RELEASE=RELEASE.2025-10-15T17-29-55Z
-SESSION_SECRET=$(random_hex 32)
-SESSION_TTL_HOURS=168
-COOKIE_SECURE=0
-PHOTO_MAX_BYTES=8388608
-LOGIN_MAX_FAILURES=5
-LOGIN_WINDOW_MINUTES=15
-RUN_MIGRATIONS=1
-SEED_DEMO=${WADDLE_SEED_DEMO:-0}
-WADDLE_DATA_DIR=$INSTALL_DIR/data
-EOF
-  )
-  chmod 600 "$ENV_FILE"
-  return 0
-}
-
-env_value() {
-  grep -E "^$1=" "$ENV_FILE" | tail -n 1 | cut -d= -f2-
-}
-
-prepare_data_dirs() {
-  local data_dir
-  data_dir="$(env_value WADDLE_DATA_DIR)"
-  [[ -n "$data_dir" ]] || data_dir="$INSTALL_DIR/data"
-  mkdir -p "$data_dir/postgres" "$data_dir/minio" 2>/dev/null || as_root mkdir -p "$data_dir/postgres" "$data_dir/minio"
-  # The spaces (MinIO) container runs as uid 1000; postgres fixes its own ownership.
-  if [[ "$(uname -s)" == "Linux" ]]; then
-    if [[ "$(stat -c %u "$data_dir/minio")" != "1000" ]]; then
-      as_root chown 1000:1000 "$data_dir/minio"
-    fi
-  fi
-}
-
-# --- admin -----------------------------------------------------------------
-
-valid_username() { [[ "$1" =~ ^[A-Za-z0-9._-]{3,40}$ ]]; }
-
-ask_admin() {
-  [[ -n "$ADMIN_USER" && -n "$ADMIN_PASSWORD" ]] && return 0
-  ADMIN_USER="${WADDLE_ADMIN_USER:-}"
-  ADMIN_PASSWORD="${WADDLE_ADMIN_PASSWORD:-}"
-  if [[ -n "$ADMIN_USER" && -n "$ADMIN_PASSWORD" ]]; then
-    valid_username "$ADMIN_USER" || die "WADDLE_ADMIN_USER must be 3-40 letters, numbers, dots, dashes or underscores."
-    [[ ${#ADMIN_PASSWORD} -ge 8 ]] || die "WADDLE_ADMIN_PASSWORD must be at least 8 characters."
-    return 0
-  fi
-  interactive || die "No admin account exists yet. Set WADDLE_ADMIN_USER and WADDLE_ADMIN_PASSWORD, or run interactively."
-
-  log "Create the first admin account"
-  while :; do
-    read -r -p "Admin username: " ADMIN_USER
-    valid_username "$ADMIN_USER" && break
-    warn "Use 3-40 letters, numbers, dots, dashes or underscores."
-  done
-  local confirm
-  while :; do
-    read -r -s -p "Admin password (min 8 characters): " ADMIN_PASSWORD
-    echo
-    if [[ ${#ADMIN_PASSWORD} -lt 8 ]]; then
-      warn "Password must be at least 8 characters."
-      continue
-    fi
-    read -r -s -p "Confirm password: " confirm
-    echo
-    [[ "$ADMIN_PASSWORD" == "$confirm" ]] && break
-    warn "Passwords did not match; try again."
-  done
-}
-
-# --- stack -----------------------------------------------------------------
-
-compose() {
-  "${DOCKER[@]}" compose -p "$PROJECT" -f "$APP_DIR/deploy/docker-compose.yml" --env-file "$ENV_FILE" "$@"
-}
-
-start_stack() {
-  log "Building and starting the stack (the first build compiles MinIO and can take several minutes)"
-  compose up -d --build --remove-orphans --wait --wait-timeout 900 ||
-    die "The stack did not become healthy. Inspect with: docker compose -p $PROJECT -f $APP_DIR/deploy/docker-compose.yml --env-file $ENV_FILE logs"
-  log "Checking /api/health through the web container"
-  local _
-  for _ in $(seq 1 30); do
-    if compose exec -T web wget -q -O - http://127.0.0.1/api/health 2>/dev/null | grep -q '"status":"ok"'; then
-      return 0
-    fi
-    sleep 2
-  done
-  die "The api health check did not pass through the web container."
-}
-
-run_migrations() {
-  log "Running database migrations"
-  compose exec -T api node api/src/cli.js migrate
-}
-
-seed_admin() {
-  if compose exec -T api node api/src/cli.js has-admin >/dev/null 2>&1; then
-    log "An admin account already exists; not creating another"
-    return 0
-  fi
-  ask_admin
-  log "Creating admin account '$ADMIN_USER'"
-  # The password goes over stdin so it never appears in a process list or in .env.
-  printf '%s' "$ADMIN_PASSWORD" | compose exec -T api node api/src/cli.js create-admin --username "$ADMIN_USER"
-}
-
-site_url() {
-  local port host
-  port="$(env_value WEB_PORT)"
-  port="${port:-80}"
-  host="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  host="${host:-localhost}"
-  if [[ "$port" == "80" ]]; then echo "http://$host/"; else echo "http://$host:$port/"; fi
-}
-
+# Under curl | bash, bash reads this script from standard input while it runs, so a command
+# that also reads standard input would swallow the rest of it. Everything is in main(), which
+# bash reads in full before running any of it.
 main() {
-  log "Waddle Aboard installer"
-  setup_privileges
-  ensure_docker
-  resolve_install_dir
-  sync_sources
-  local fresh=0
-  if write_env; then fresh=1; fi
-  # Ask for the admin before the long build on a first install.
-  if [[ "$fresh" == "1" ]]; then ask_admin; fi
-  prepare_data_dirs
-  start_stack
-  run_migrations
-  seed_admin
-  log "Waddle Aboard is running at $(site_url)"
-  log "Admin login: $(site_url)login"
+
+REPO="${WADDLE_REPO:-https://github.com/encondata/waddleaboard.git}"
+BRANCH="${WADDLE_BRANCH:-main}"
+
+say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+warn() { printf '\n\033[33m%s\033[0m\n' "$*" >&2; }
+die() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
+# Ask on the terminal even under curl | bash (which has the script, not the keyboard, on
+# standard input). With no terminal at all the suggestion is used.
+ask() { # ask "Question" "suggestion" -> answer on stdout
+  local answer=""
+  if { exec 3</dev/tty; } 2>/dev/null; then
+    printf '\n%s [%s] ' "$1" "$2" > /dev/tty
+    read -r answer <&3 || answer=""
+    exec 3<&-
+  fi
+  printf '%s' "${answer:-$2}"
+}
+
+UNRAID=no; [ -d /mnt/user ] && [ -f /etc/unraid-version ] && UNRAID=yes
+if ! command -v git >/dev/null 2>&1; then
+  [ "$UNRAID" = yes ] && die "git is not installed. On Unraid, add it with the NerdTools or un-get plugin (Apps tab), then run this again."
+  die "git is not installed."
+fi
+command -v curl >/dev/null 2>&1 || die "curl is not installed."
+command -v docker >/dev/null 2>&1 || die "docker is not installed. See https://docs.docker.com/get-docker/"
+if ! docker compose version >/dev/null 2>&1; then
+  [ "$UNRAID" = yes ] && die "This needs Docker Compose v2. On Unraid, install the Docker Compose Manager plugin (Apps tab), then run this again."
+  die "This needs Docker Compose v2 (the 'docker compose' subcommand)."
+fi
+docker info >/dev/null 2>&1 || die "Docker is installed but not running. Start it and try again."
+
+# Where it runs now, if it does. An install made by the first installer (sources copied to
+# <dir>/app, recorded in /etc/waddleaboard/install.conf) is not a git checkout, so it cannot
+# be updated in place; its settings and data are brought over instead.
+RUNNING_WD="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' \
+  waddleaboard-web-1 2>/dev/null || true)"
+OLD_DIR=""
+case "$RUNNING_WD" in */app/deploy) OLD_DIR="${RUNNING_WD%/app/deploy}"; RUNNING_WD="" ;; esac
+if [ -z "$OLD_DIR" ] && [ -r /etc/waddleaboard/install.conf ]; then
+  OLD_DIR="$(sed -n 's/^INSTALL_DIR="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/waddleaboard/install.conf | tail -1)"
+fi
+if [ -n "$OLD_DIR" ] && { [ ! -f "$OLD_DIR/.env" ] || [ -d "$OLD_DIR/.git" ]; }; then OLD_DIR=""; fi
+
+# Where it goes. Suggested: where it runs now, so an update is just Enter; otherwise the
+# array on Unraid, or the home directory. WADDLE_DIR skips the question.
+if [ -n "$RUNNING_WD" ]; then DEFAULT_DIR="$RUNNING_WD"
+elif [ -d /mnt/user ]; then DEFAULT_DIR=/mnt/user/waddleaboard
+else DEFAULT_DIR="$HOME/waddleaboard"; fi
+DIR="${WADDLE_DIR:-}"
+[ -n "$DIR" ] || DIR="$(ask "Install Waddle Aboard where?" "$DEFAULT_DIR")"
+case "$DIR" in "~"*) DIR="$HOME${DIR#\~}" ;; esac
+DIR="${DIR%/}"
+case "$DIR" in /*) ;; *) die "Please give a full path, starting with /." ;; esac
+if [ -n "$RUNNING_WD" ] && [ "$DIR" != "$RUNNING_WD" ]; then
+  die "Waddle Aboard is already running from $RUNNING_WD. Run this again and keep that folder, or stop it first:
+  docker compose -f $RUNNING_WD/docker-compose.yml down"
+fi
+if [ -n "$OLD_DIR" ] && [ "$DIR" = "$OLD_DIR" ]; then
+  die "$DIR holds an install made by the earlier installer, which this one cannot update in place.
+Choose a new folder: its settings and data will be brought over from $DIR."
+fi
+# Somewhere with files in it that are not Waddle Aboard would make git refuse to clone.
+if [ -d "$DIR" ] && [ ! -d "$DIR/.git" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
+  die "$DIR already has other files in it. Choose an empty or new folder."
+fi
+
+# When something will not start: which containers are up, and the last words of each, so
+# the reason is on screen rather than behind another command.
+report() {
+  printf '\n\033[1mContainers:\033[0m\n' >&2
+  docker compose ps -a >&2 || true
+  for svc in db spaces api web; do
+    printf '\n\033[1mLast lines from %s:\033[0m\n' "$svc" >&2
+    docker compose logs --no-color --tail 25 "$svc" >&2 2>&1 || true
+  done
+}
+
+# The compose file lives in the repository, so the code has to come first.
+if [ -d "$DIR/.git" ]; then
+  say "Updating $DIR"
+  git -C "$DIR" fetch --depth 1 origin "$BRANCH"
+  git -C "$DIR" checkout -q "$BRANCH"
+  git -C "$DIR" reset --hard "origin/$BRANCH"
+else
+  say "Cloning into $DIR"
+  git clone --depth 1 --branch "$BRANCH" "$REPO" "$DIR"
+fi
+
+cd "$DIR"
+
+# A little randomness, from openssl when it is there and /dev/urandom when it is not.
+rand_hex() {
+  if command -v openssl >/dev/null 2>&1; then openssl rand -hex "$1"
+  else head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; fi
+}
+env_value() { sed -n "s/^$1=//p" .env | tail -1; }
+# This machine's LAN address, for suggesting where to open the site.
+lan_ip() {
+  local ip
+  ip="$( (hostname -I 2>/dev/null || true) | awk '{print $1}')"
+  [ -n "$ip" ] || ip="$( (ip -4 route get 1.1.1.1 2>/dev/null || true) | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+  printf '%s' "${ip:-localhost}"
+}
+
+ADOPTED=no
+if [ ! -f .env ] && [ -n "$OLD_DIR" ]; then
+  # Same passwords and the same data folder, so the database and photos carry on as they were.
+  say "Bringing over the settings and data of the earlier install in $OLD_DIR"
+  cp "$OLD_DIR/.env" .env
+  chmod 600 .env
+  grep -q '^WADDLE_DATA_DIR=/' .env || printf '\nWADDLE_DATA_DIR=%s/data\n' "$OLD_DIR" >> .env
+  ADOPTED=yes
+elif [ ! -f .env ]; then
+  PORT="${WADDLE_PORT:-8430}"
+  case "$PORT" in ''|*[!0-9]*) die "WADDLE_PORT must be a number." ;; esac
+  URL="${WADDLE_SITE_URL:-}"
+  [ -n "$URL" ] || URL="$(ask "Public address people will use (your reverse proxy's https:// URL)?" \
+    "http://$(lan_ip):$PORT")"
+  URL="${URL%/}"
+  case "$URL" in http://*|https://*) ;; *) die "The address must start with http:// or https://." ;; esac
+  SECURE=0; case "$URL" in https://*) SECURE=1 ;; esac
+  ADMIN_USER="${WADDLE_ADMIN_USER:-admin}"
+  printf '%s' "$ADMIN_USER" | grep -Eq '^[A-Za-z0-9._-]{3,40}$' ||
+    die "WADDLE_ADMIN_USER must be 3-40 letters, numbers, dots, dashes or underscores."
+  ADMIN_PASSWORD="${WADDLE_ADMIN_PASSWORD:-$(rand_hex 12)}"
+  [ "${#ADMIN_PASSWORD}" -ge 8 ] || die "WADDLE_ADMIN_PASSWORD must be at least 8 characters."
+
+  say "Generating secrets and an administrator password"
+  {
+    printf '# Waddle Aboard settings, written by install.sh. See .env.example for every option.\n'
+    printf '# The address people use. An https:// address turns on secure cookies.\n'
+    printf 'SITE_URL=%s\n' "$URL"
+    printf 'COOKIE_SECURE=%s\n' "$SECURE"
+    printf '# Port on this machine for the reverse proxy to forward to, and the interface it\n'
+    printf '# listens on (127.0.0.1 when the proxy runs on this machine).\n'
+    printf 'WEB_PORT=%s\n' "$PORT"
+    printf 'WEB_BIND=0.0.0.0\n\n'
+    printf '# Back these up together with the data folder.\n'
+    printf 'POSTGRES_PASSWORD=%s\n' "$(rand_hex 24)"
+    printf 'MINIO_ROOT_PASSWORD=%s\n' "$(rand_hex 24)"
+    printf 'SESSION_SECRET=%s\n\n' "$(rand_hex 32)"
+    printf '# The database (postgres/) and photos (minio/) live here.\n'
+    printf 'WADDLE_DATA_DIR=%s/data\n\n' "$DIR"
+    printf '# The first administrator. Used only when there is no administrator yet;\n'
+    printf '# after that it is ignored, and the password here is just a record of what\n'
+    printf '# was set.\n'
+    printf 'WADDLE_ADMIN_USER=%s\n' "$ADMIN_USER"
+    printf 'WADDLE_ADMIN_PASSWORD=%s\n\n' "$ADMIN_PASSWORD"
+    printf '# 1 loads the sample ducks (Sunny DP-0427 and friends) each time the api starts.\n'
+    printf 'SEED_DEMO=%s\n' "${WADDLE_SEED_DEMO:-0}"
+  } > .env
+  chmod 600 .env
+fi
+
+DATA_DIR="$(env_value WADDLE_DATA_DIR)"; DATA_DIR="${DATA_DIR:-./data}"
+case "$DATA_DIR" in /*) ;; *) DATA_DIR="$DIR/${DATA_DIR#./}" ;; esac
+mkdir -p "$DATA_DIR/postgres" "$DATA_DIR/minio" || die "Could not make $DATA_DIR. Is $DIR writable?"
+
+say "Pulling images"
+docker compose pull db
+
+# The photo store runs as uid 1000 and cannot write to a folder it does not own. Docker can
+# change that without sudo, using the database image that is already here.
+if [ "$(uname -s)" = Linux ] && [ "$(stat -c %u "$DATA_DIR/minio")" != 1000 ]; then
+  docker run --rm --user 0 -v "$DATA_DIR/minio:/d" --entrypoint chown postgres:17-alpine 1000:1000 /d \
+    </dev/null || die "Could not hand $DATA_DIR/minio to the photo store (uid 1000)."
+fi
+
+say "Building and starting"
+echo "The first build compiles the photo store (MinIO) from source, which takes several minutes."
+UP_ARGS=(-d --build --remove-orphans)
+# The earlier install's containers have the same names; replace them rather than keep them.
+[ "$ADOPTED" = yes ] && UP_ARGS+=(--force-recreate)
+if ! docker compose up "${UP_ARGS[@]}"; then
+  report
+  die "Waddle Aboard could not be started; the reason is above. If port $(env_value WEB_PORT) is already in use, set WEB_PORT in $DIR/.env and run this again."
+fi
+
+PORT="$(env_value WEB_PORT)"; PORT="${PORT:-8430}"
+BIND="$(env_value WEB_BIND)"; BIND="${BIND:-0.0.0.0}"
+URL="$(env_value SITE_URL)"; URL="${URL:-http://$(lan_ip):$PORT}"
+BASE="http://127.0.0.1:$PORT"
+
+printf '\nWaiting for the server'
+UP=no
+for _ in $(seq 1 90); do
+  if curl -fsS "$BASE/api/health" >/dev/null 2>&1; then UP=yes; break; fi
+  printf '.'; sleep 2
+done
+printf '\n'
+if [ "$UP" != yes ]; then
+  report
+  die "The server did not answer on $BASE within three minutes; the reason is above. Once it is fixed, run this again: your data is kept."
+fi
+
+ADMIN_USER="$(env_value WADDLE_ADMIN_USER)"
+ADMIN_PASSWORD="$(env_value WADDLE_ADMIN_PASSWORD)"
+if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASSWORD" ] &&
+   ! docker compose exec -T api node api/src/cli.js has-admin </dev/null >/dev/null 2>&1; then
+  say "Creating the administrator $ADMIN_USER"
+  # Over standard input, so the password never shows in a process list.
+  if ! printf '%s' "$ADMIN_PASSWORD" | docker compose exec -T api node api/src/cli.js create-admin --username "$ADMIN_USER"; then
+    warn "The administrator could not be created; the reason is above."
+  fi
+fi
+
+# Rather than assume the account was created, try it. A 200 means these credentials are
+# live and worth printing; anything else means an administrator already existed with a
+# different password, and printing this one would be a lie.
+ADMIN_WORKS=no
+if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASSWORD" ]; then
+  CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' \
+    --data "{\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASSWORD\"}" \
+    "$BASE/api/auth/login" 2>/dev/null || true)"
+  [ "$CODE" = "200" ] && ADMIN_WORKS=yes
+fi
+
+# What the database holds, so an update can be seen to have kept everything.
+PG_USER="$(env_value POSTGRES_USER)"; PG_USER="${PG_USER:-waddle}"
+PG_DB="$(env_value POSTGRES_DB)"; PG_DB="${PG_DB:-waddleaboard}"
+HELD="$(docker compose exec -T db psql -U "$PG_USER" -d "$PG_DB" -Atc \
+  "SELECT (SELECT count(*) FROM duck_types) || ' duck types, ' || (SELECT count(*) FROM ducks) || ' ducks, ' ||
+          (SELECT count(*) FROM finds) || ' finds, ' || (SELECT count(*) FROM users) || ' accounts'" \
+  </dev/null 2>/dev/null || true)"
+
+say "Waddle Aboard is up."
+cat <<SUMMARY
+
+  Listening on      $BIND:$PORT  (plain HTTP, for your reverse proxy)
+  Public address    $URL
+
+  Installed in      $DIR
+  Data in           $DATA_DIR
+  Holding           ${HELD:-(could not read the database)}
+
+  Back up $DIR/.env and $DATA_DIR.
+SUMMARY
+
+if [ "$ADOPTED" = yes ]; then
+  cat <<MOVED
+
+The earlier install in $OLD_DIR has been replaced by this one. Its data is
+still used where it is ($DATA_DIR); $OLD_DIR/app, $OLD_DIR/.env and
+/etc/waddleaboard/install.conf are no longer needed.
+MOVED
+fi
+
+if [ "$ADMIN_WORKS" = yes ]; then
+  cat <<ADMIN
+
+Sign in at $URL/login with
+
+  Username    $ADMIN_USER
+  Password    $ADMIN_PASSWORD
+
+This is also kept in $DIR/.env.
+ADMIN
+else
+  printf '\nAn administrator account already exists, so no new one was made.\n'
+  [ -n "$ADMIN_PASSWORD" ] && printf 'The password in .env is not its password.\n'
+  cat <<ADMIN
+If nobody knows the password any more, add another administrator with a
+name not taken yet:
+
+  printf '%s' 'a-new-password' | docker compose -f $DIR/docker-compose.yml \\
+    exec -T api node api/src/cli.js create-admin --username another-admin
+ADMIN
+fi
+
+if [ "$(env_value COOKIE_SECURE)" = 1 ]; then
+  cat <<TLS
+
+Sign-in cookies are marked secure, so signing in works only through
+$URL, not on port $PORT directly.
+TLS
+fi
+
+cat <<TAIL
+
+  Update   run this installer again
+  Logs     docker compose -f $DIR/docker-compose.yml logs -f
+  Stop     docker compose -f $DIR/docker-compose.yml down
+TAIL
 }
 
 main "$@"

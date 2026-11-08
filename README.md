@@ -10,56 +10,45 @@ register ducks.
 | `web/` | React 19 + Vite site (pages, styles and artwork copied from `duckport-site`) |
 | `api/` | Node 22 HTTP/JSON API (`node:http`, `pg`, `minio`, `bcryptjs`) |
 | `db/migrations/` | Ordered SQL migrations; `db/seeds/demo.sql` holds the optional sample ducks |
-| `deploy/` | `docker-compose.yml`, Dockerfiles, nginx config, `smoke-test.sh` |
-| `install.sh` | One-shot installer for a Linux host |
+| `deploy/` | Dockerfiles, nginx config, `smoke-test.sh` |
+| `docker-compose.yml` | The stack: `db` (PostgreSQL), `spaces` (MinIO), `api`, `web` (nginx) |
+| `install.sh` | One-line installer for a Docker host |
 
 ## Install on a server
 
-You need a Debian/Ubuntu or RHEL-family host (RHEL, CentOS, Rocky, Alma, Fedora) and root or sudo.
+On a Linux machine with Docker and Compose v2:
 
 ```bash
-git clone https://github.com/encondata/waddleaboard.git
-cd waddleaboard
-sudo ./install.sh
+curl -fsSL https://raw.githubusercontent.com/encondata/waddleaboard/main/install.sh | bash
 ```
 
-The installer does the following:
+It asks where to install (default `~/waddleaboard`, or `/mnt/user/waddleaboard` on Unraid) and the
+address people will use, clones the repository, writes `.env` with fresh secrets and an administrator
+account, builds the images and starts the stack. The first build compiles MinIO from source and takes
+several minutes. The database and photos live in `data/postgres` and `data/minio` inside the install
+folder (set `WADDLE_DATA_DIR` in `.env` to move them). Back up `.env` and `data/`.
 
-1. Installs Docker Engine and the Compose v2 plugin from download.docker.com if they are missing.
-2. Asks for an install directory (default `/mntuser/waddleaboard`) and records it in
-   `/etc/waddleaboard/install.conf`.
-3. Asks for the first admin username and password (hidden, confirmed, at least 8 characters).
-4. Writes `<dir>/.env` (mode 600) with generated database, MinIO and session secrets.
-5. Copies the app to `<dir>/app`, builds and starts the stack, waits for every service to be
-   healthy, runs migrations and creates the admin.
+Run the same command again to update: it keeps `.env` and the data, and only prints the admin
+password while it still works. `WADDLE_DIR`, `WADDLE_SITE_URL`, `WADDLE_PORT`, `WADDLE_ADMIN_USER`,
+`WADDLE_ADMIN_PASSWORD` and `WADDLE_SEED_DEMO=1` (loads Sunny DP-0427 and the other sample ducks)
+answer the questions up front; `WADDLE_REPO` and `WADDLE_BRANCH` pick another source.
 
-The install dir holds `app/` (sources), `.env`, and `data/postgres` and `data/minio`
-(bind mounts). Back up `.env` and `data/`.
+Waddle Aboard serves plain HTTP on port 8430 (`WEB_PORT`) for a TLS reverse proxy. Give the installer
+the proxy's `https://` address and it marks sign-in cookies secure (`COOKIE_SECURE=1`), after which
+signing in works only through the proxy.
 
-You can run it again at any time, for example after a `git pull` to deploy an update.
-A re-run reuses the recorded directory, never overwrites `.env`, and never creates a
-second admin.
-
-Non-interactive (CI or testing):
-
-```bash
-WADDLE_YES=1 WADDLE_INSTALL_DIR=/srv/waddle WADDLE_ADMIN_USER=admin \
-  WADDLE_ADMIN_PASSWORD='a-long-password' ./install.sh
-```
-
-Optional variables, read on first install only: `WADDLE_WEB_PORT` (default 80) and
-`WADDLE_SEED_DEMO=1` (loads Sunny DP-0427 and the other sample ducks).
-`WADDLE_CONF_FILE` moves the install record.
+An install made by the earlier installer (sources copied to `<dir>/app`, recorded in
+`/etc/waddleaboard/install.conf`) is picked up: install into a new folder and its `.env` and data
+folder are carried over.
 
 ### Operating the stack
 
 ```bash
-cd /mntuser/waddleaboard
-alias wa='docker compose -p waddleaboard -f app/deploy/docker-compose.yml --env-file .env'
-wa ps                      # health of web, api, db, spaces
-wa logs -f api
-wa exec -T api node api/src/cli.js create-user --username pat --role owner <<< 'owner-password'
-wa exec -T api node api/src/cli.js seed-demo
+cd ~/waddleaboard                # or wherever you installed it
+docker compose ps                # health of web, api, db, spaces
+docker compose logs -f api
+docker compose exec -T api node api/src/cli.js create-user --username pat --role owner <<< 'owner-password'
+docker compose exec -T api node api/src/cli.js seed-demo
 ```
 
 Admins can also add owners and ducks from `/admin`.
@@ -71,14 +60,14 @@ Requires Node 22 and npm 11.
 ```bash
 npm install                      # installs the api and web workspaces
 cp .env.example .env             # then set real passwords and a SESSION_SECRET
-docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
+docker compose up -d --build
 ```
 
-The site is then at `http://localhost` (or `WEB_PORT`). For hot reload, keep `db` and
+The site is then at `http://localhost:8430` (or `WEB_PORT`). For hot reload, keep `db` and
 `spaces` running in compose and run the api and Vite locally:
 
 ```bash
-docker compose -f deploy/docker-compose.yml --env-file .env up -d db spaces
+docker compose up -d db spaces
 # expose 5432/9000 locally (for example with a compose override), then:
 POSTGRES_PASSWORD=... MINIO_ROOT_PASSWORD=... npm run dev:api
 npm run dev:web                  # Vite proxies /api to http://localhost:3000
@@ -96,7 +85,7 @@ for Postgres and MinIO, so they do not need Docker.
 To test a running stack end to end, run the smoke test:
 
 ```bash
-BASE_URL=http://localhost WADDLE_ADMIN_USER=admin WADDLE_ADMIN_PASSWORD=... deploy/smoke-test.sh
+BASE_URL=http://localhost:8430 WADDLE_ADMIN_USER=admin WADDLE_ADMIN_PASSWORD=... deploy/smoke-test.sh
 ```
 
 ## API at a glance
@@ -154,4 +143,5 @@ Migration `005_duck_types.sql` backfills existing ducks into types grouped by na
   (JPEG/PNG/WebP), enforces `PHOTO_MAX_BYTES` (default 8 MB) and streams photos back itself.
 - MinIO no longer publishes container images, so `deploy/minio.Dockerfile` builds the
   pinned upstream release from source. MinIO is AGPL-3.0.
-- No TLS yet. Put a TLS-terminating proxy in front and set `COOKIE_SECURE=1`.
+- No TLS of its own. Put a TLS-terminating proxy in front; `COOKIE_SECURE=1` (set by the installer
+  for an `https://` address) keeps the session cookie off plain HTTP.
